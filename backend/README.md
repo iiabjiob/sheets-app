@@ -3,6 +3,13 @@ FastAPI + AsyncPG
 
 ## Local environment
 
+Create local env files from the templates before running the app:
+
+```bash
+cp .env.dev.example .env.dev
+cp .env.db.dev.example .env.db.dev
+```
+
 ```bash
 cd backend
 uv sync
