@@ -1,0 +1,29 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+      tags:
+        - sheets-dev:latest
+    container_name: sheets-dev-container
+    volumes:
+      - .:/workspace
+    command: sleep infinity
+    networks:
+      - net
+  db:
+    image: postgres:16
+    container_name: sheets-db-dev
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env.db.dev
+    volumes:
+      - db_data_dev:/var/lib/postgresql/data
+    networks:
+      - net
+
+volumes:
+  db_data_dev:
+
+networks:
+  net:
