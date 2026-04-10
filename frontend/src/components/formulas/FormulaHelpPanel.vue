@@ -65,7 +65,9 @@ function matchesEntry(entry: FormulaHelpEntry, query: string) {
       <label class="formula-help__search">
         <span class="sr-only">Search formulas</span>
         <input
+          id="formula-help-search"
           v-model="searchQuery"
+          name="formulaHelpSearch"
           type="search"
           placeholder="Search functions or examples"
           spellcheck="false"

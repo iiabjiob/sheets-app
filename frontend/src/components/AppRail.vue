@@ -54,6 +54,8 @@ const searchInputRef = ref<HTMLInputElement | null>(null)
 const workspaces = ref<WorkspaceSummary[]>([])
 const isLoadingIndex = ref(false)
 const loadError = ref<string | null>(null)
+const searchInputId = 'global-sheet-search-input'
+const searchInputName = 'globalSheetSearch'
 
 const activeNavKey = computed(() => {
   const value = route.meta.navKey
@@ -241,6 +243,8 @@ function formatUpdatedAt(value: string) {
               <input
                 ref="searchInputRef"
                 v-model="searchQuery"
+                :id="searchInputId"
+                :name="searchInputName"
                 class="dialog-input"
                 type="text"
                 placeholder="Search by sheet or workspace name"

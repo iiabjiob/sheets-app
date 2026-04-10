@@ -33,6 +33,12 @@ interface HighlightSegment {
   hasError: boolean
 }
 
+interface FormulaEditorState {
+  value: string
+  selectionStart: number
+  selectionEnd: number
+}
+
 type DataGridFormulaToken = NonNullable<DataGridFormulaDiagnosticsResult['tokens']>[number]
 
 const FORMULA_REFERENCE_OPTIONS = {
@@ -257,7 +263,7 @@ async function closeDialog() {
 
 function resetDraft() {
   labelValue.value = props.initialLabel?.trim() ?? ''
-  formulaValue.value = props.initialExpression ?? ''
+  formulaValue.value = coerceFormulaEditorState(props.initialExpression ?? '=').value
   dataTypeValue.value = props.initialDataType ?? 'number'
 }
 
@@ -265,18 +271,22 @@ function insertReference(label: string) {
   const reference = `[${label}]@row`
   const input = formulaInputRef.value
   if (!input) {
-    formulaValue.value = `${formulaValue.value}${reference}`
+    formulaValue.value = coerceFormulaEditorState(`${formulaValue.value}${reference}`).value
     return
   }
 
   const start = input.selectionStart ?? formulaValue.value.length
   const end = input.selectionEnd ?? start
-  formulaValue.value = `${formulaValue.value.slice(0, start)}${reference}${formulaValue.value.slice(end)}`
+  const nextState = coerceFormulaEditorState(
+    `${formulaValue.value.slice(0, start)}${reference}${formulaValue.value.slice(end)}`,
+    start + reference.length,
+    start + reference.length,
+  )
+  formulaValue.value = nextState.value
 
   void nextTick(() => {
     input.focus()
-    const nextCursor = start + reference.length
-    input.setSelectionRange(nextCursor, nextCursor)
+    input.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
   })
 }
 
@@ -295,6 +305,100 @@ function submit() {
 function normalizeFormulaExpression(value: string) {
   const normalized = value.replace(/^\s*=+\s*/, '').trim()
   return normalized
+}
+
+function clampFormulaEditorSelection(position: number, valueLength: number) {
+  return Math.min(valueLength, Math.max(1, position))
+}
+
+function coerceFormulaEditorState(
+  value: string,
+  selectionStart: number | null = null,
+  selectionEnd: number | null = null,
+): FormulaEditorState {
+  const rawValue = value.length > 0 ? value : '='
+  const hadLeadingEquals = rawValue.startsWith('=')
+  const nextValue = hadLeadingEquals ? rawValue : `=${rawValue.replace(/^=+/, '')}`
+  const prefixOffset = hadLeadingEquals ? 0 : 1
+  const defaultSelection = nextValue.length
+  let nextSelectionStart = (selectionStart ?? defaultSelection) + prefixOffset
+  let nextSelectionEnd = (selectionEnd ?? selectionStart ?? defaultSelection) + prefixOffset
+
+  nextSelectionStart = clampFormulaEditorSelection(nextSelectionStart, nextValue.length)
+  nextSelectionEnd = clampFormulaEditorSelection(nextSelectionEnd, nextValue.length)
+
+  if (nextSelectionEnd < nextSelectionStart) {
+    nextSelectionEnd = nextSelectionStart
+  }
+
+  return {
+    value: nextValue,
+    selectionStart: nextSelectionStart,
+    selectionEnd: nextSelectionEnd,
+  }
+}
+
+function syncFormulaInputCaretBoundary() {
+  const input = formulaInputRef.value
+  if (!input) {
+    return
+  }
+
+  const nextState = coerceFormulaEditorState(
+    input.value,
+    input.selectionStart,
+    input.selectionEnd,
+  )
+
+  if (formulaValue.value !== nextState.value) {
+    formulaValue.value = nextState.value
+  }
+
+  input.value = nextState.value
+  input.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
+}
+
+function handleFormulaInput(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLTextAreaElement)) {
+    return
+  }
+
+  const nextState = coerceFormulaEditorState(
+    target.value,
+    target.selectionStart,
+    target.selectionEnd,
+  )
+
+  formulaValue.value = nextState.value
+  target.value = nextState.value
+  target.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
+}
+
+function handleFormulaInputFocus() {
+  syncFormulaInputCaretBoundary()
+}
+
+function handleFormulaInputKeydown(event: KeyboardEvent) {
+  const target = event.target instanceof HTMLTextAreaElement ? event.target : null
+  if (!target) {
+    return
+  }
+
+  const selectionStart = target.selectionStart ?? 0
+  const selectionEnd = target.selectionEnd ?? selectionStart
+  const caretTouchesPrefix = selectionStart <= 1 && selectionEnd <= 1
+
+  if ((event.key === 'ArrowLeft' || event.key === 'Backspace') && caretTouchesPrefix) {
+    event.preventDefault()
+    target.setSelectionRange(1, 1)
+    return
+  }
+
+  if (event.key === 'Home') {
+    event.preventDefault()
+    target.setSelectionRange(1, 1)
+  }
 }
 
 function resolveFormulaTokens(
@@ -421,16 +525,22 @@ function handleFormulaInputScroll() {
 
               <textarea
                 ref="formulaInputRef"
-                v-model="formulaValue"
+                :value="formulaValue"
                 class="formula-editor__input"
                 spellcheck="false"
                 placeholder="=[Column 1]@row + [Column 2]@row"
+                @focus="handleFormulaInputFocus"
+                @click="syncFormulaInputCaretBoundary"
+                @input="handleFormulaInput"
+                @keydown="handleFormulaInputKeydown"
+                @keyup="syncFormulaInputCaretBoundary"
                 @scroll="handleFormulaInputScroll"
+                @select="syncFormulaInputCaretBoundary"
               />
             </div>
 
             <small class="formula-dialog__hint">
-              Start with `=` if you want. Column references support Smartsheet-style syntax.
+              Formula always starts with `=`. Column references use Smartsheet-style syntax.
             </small>
           </label>
 

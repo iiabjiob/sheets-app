@@ -171,6 +171,12 @@ interface FormulaReferencePointerState {
   replaceEnd: number | null
 }
 
+interface FormulaEditorState {
+  value: string
+  selectionStart: number
+  selectionEnd: number
+}
+
 interface GridHistorySnapshot {
   columns: SheetGridColumn[]
   rows: GridRow[]
@@ -179,6 +185,11 @@ interface GridHistorySnapshot {
 interface GridHistoryEntry {
   label: string
   snapshot: GridHistorySnapshot
+}
+
+interface SheetDraftContext {
+  workspaceId: string | null
+  sheetId: string | null
 }
 
 const GRID_LINES = {
@@ -242,8 +253,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   createWorkspace: []
-  draftChange: [payload: SheetGridUpdateInput | null]
-  dirtyChange: [value: boolean]
+  draftChange: [payload: SheetGridUpdateInput | null, context: SheetDraftContext]
+  dirtyChange: [value: boolean, context: SheetDraftContext]
   save: []
 }>()
 
@@ -430,6 +441,7 @@ const inlineFormulaCanApply = computed(
 watch(
   () => [props.workspaceId, props.sheetId, props.sheet?.updated_at ?? null],
   () => {
+    const context = getSheetDraftContext()
     resetGridSessionState()
     clearGridHistory()
     inputColumns.value = cloneGridColumns(props.sheet?.columns ?? [])
@@ -440,8 +452,8 @@ watch(
       columns: inputColumns.value,
       rows: inputRows.value,
     })
-    emit('draftChange', null)
-    emit('dirtyChange', false)
+    emit('draftChange', null, context)
+    emit('dirtyChange', false, context)
   },
   { immediate: true },
 )
@@ -758,7 +770,9 @@ function openInlineFormulaComposer(
   activeCell: NonNullable<ReturnType<typeof resolveActiveCellState>>,
   draftValue?: string,
 ) {
-  const nextValue = draftValue ?? resolveRawCellFormulaValue(activeCell.rowIndex, activeCell.columnKey) ?? '='
+  const nextValue =
+    draftValue ?? resolveRawCellFormulaValue(activeCell.rowIndex, activeCell.columnKey) ?? '='
+  const nextState = coerceFormulaEditorState(nextValue)
   dismissedInlineFormulaCellKey.value = null
   inlineFormulaCell.value = {
     rowId: activeCell.rowId,
@@ -766,7 +780,7 @@ function openInlineFormulaComposer(
     columnKey: activeCell.columnKey,
     columnLabel: resolveColumnLabel(activeCell.columnKey),
   }
-  inlineFormulaValue.value = nextValue
+  inlineFormulaValue.value = nextState.value
   refreshInlineFormulaComposer(true)
 }
 
@@ -833,7 +847,7 @@ function syncInlineFormulaState() {
     columnKey: activeCell.columnKey,
     columnLabel: resolveColumnLabel(activeCell.columnKey),
   }
-  inlineFormulaValue.value = rawFormulaValue
+  inlineFormulaValue.value = coerceFormulaEditorState(rawFormulaValue).value
   refreshInlineFormulaComposer()
 }
 
@@ -904,6 +918,57 @@ function focusInlineFormulaInput() {
   input.focus()
   const nextCaret = inlineFormulaValue.value.length
   input.setSelectionRange(nextCaret, nextCaret)
+}
+
+function clampFormulaEditorSelection(position: number, valueLength: number) {
+  return Math.min(valueLength, Math.max(1, position))
+}
+
+function coerceFormulaEditorState(
+  value: string,
+  selectionStart: number | null = null,
+  selectionEnd: number | null = null,
+): FormulaEditorState {
+  const rawValue = value.length > 0 ? value : '='
+  const hadLeadingEquals = rawValue.startsWith('=')
+  const nextValue = hadLeadingEquals ? rawValue : `=${rawValue.replace(/^=+/, '')}`
+  const prefixOffset = hadLeadingEquals ? 0 : 1
+  const defaultSelection = nextValue.length
+  let nextSelectionStart = (selectionStart ?? defaultSelection) + prefixOffset
+  let nextSelectionEnd = (selectionEnd ?? selectionStart ?? defaultSelection) + prefixOffset
+
+  nextSelectionStart = clampFormulaEditorSelection(nextSelectionStart, nextValue.length)
+  nextSelectionEnd = clampFormulaEditorSelection(nextSelectionEnd, nextValue.length)
+
+  if (nextSelectionEnd < nextSelectionStart) {
+    nextSelectionEnd = nextSelectionStart
+  }
+
+  return {
+    value: nextValue,
+    selectionStart: nextSelectionStart,
+    selectionEnd: nextSelectionEnd,
+  }
+}
+
+function syncInlineFormulaCaretBoundary() {
+  const input = inlineFormulaInputRef.value
+  if (!input) {
+    return
+  }
+
+  const nextState = coerceFormulaEditorState(
+    input.value,
+    input.selectionStart,
+    input.selectionEnd,
+  )
+
+  if (inlineFormulaValue.value !== nextState.value) {
+    inlineFormulaValue.value = nextState.value
+  }
+
+  input.value = nextState.value
+  input.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
 }
 
 function focusGridSelectionAnchor() {
@@ -1068,7 +1133,9 @@ function previewInlineFormulaReferenceDrag(
   pointerState.previewRowIndex = target.rowIndex
   pointerState.previewColumnKey = target.columnKey
   pointerState.previewColumnLabel = resolveColumnLabel(target.columnKey)
-  inlineFormulaValue.value = `${pointerState.expressionPrefix}${nextExpression}`
+  inlineFormulaValue.value = coerceFormulaEditorState(
+    `${pointerState.expressionPrefix}${nextExpression}`,
+  ).value
 }
 
 function insertFormulaReference(target: {
@@ -1086,14 +1153,18 @@ function insertFormulaReference(target: {
   const selectionStart = activeInput?.selectionStart ?? inlineFormulaValue.value.length
   const selectionEnd = activeInput?.selectionEnd ?? selectionStart
   const nextValue = `${inlineFormulaValue.value.slice(0, selectionStart)}${reference}${inlineFormulaValue.value.slice(selectionEnd)}`
-  const nextCaret = selectionStart + reference.length
+  const nextState = coerceFormulaEditorState(
+    nextValue,
+    selectionStart + reference.length,
+    selectionStart + reference.length,
+  )
 
-  inlineFormulaValue.value = nextValue
+  inlineFormulaValue.value = nextState.value
 
   window.requestAnimationFrame(() => {
     const formulaInput = inlineFormulaInputRef.value ?? resolveActiveEditorInput()
     formulaInput?.focus({ preventScroll: true })
-    formulaInput?.setSelectionRange(nextCaret, nextCaret)
+    formulaInput?.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
     syncInlineFormulaScroll()
     scheduleInlineFormulaSync()
   })
@@ -1105,11 +1176,20 @@ function handleInlineFormulaInput(event: Event) {
     return
   }
 
-  inlineFormulaValue.value = target.value
+  const nextState = coerceFormulaEditorState(
+    target.value,
+    target.selectionStart,
+    target.selectionEnd,
+  )
+
+  inlineFormulaValue.value = nextState.value
+  target.value = nextState.value
+  target.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
   syncInlineFormulaScroll()
 }
 
 function handleInlineFormulaFocus() {
+  syncInlineFormulaCaretBoundary()
   syncInlineFormulaScroll()
 }
 
@@ -1124,10 +1204,31 @@ function handleInlineFormulaPaneKeydown(event: KeyboardEvent) {
 }
 
 function handleInlineFormulaKeydown(event: KeyboardEvent) {
+  const target = event.target instanceof HTMLTextAreaElement ? event.target : null
+
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
     applyInlineFormulaDraft()
     return
+  }
+
+  if (!target) {
+    return
+  }
+
+  const selectionStart = target.selectionStart ?? 0
+  const selectionEnd = target.selectionEnd ?? selectionStart
+  const caretTouchesPrefix = selectionStart <= 1 && selectionEnd <= 1
+
+  if ((event.key === 'ArrowLeft' || event.key === 'Backspace') && caretTouchesPrefix) {
+    event.preventDefault()
+    target.setSelectionRange(1, 1)
+    return
+  }
+
+  if (event.key === 'Home') {
+    event.preventDefault()
+    target.setSelectionRange(1, 1)
   }
 }
 
@@ -1193,9 +1294,11 @@ function revertInlineFormulaDraft() {
   }
 
   inlineFormulaValue.value =
-    resolveRawCellFormulaValue(targetCell.rowIndex, targetCell.columnKey) ?? ''
+    coerceFormulaEditorState(
+      resolveRawCellFormulaValue(targetCell.rowIndex, targetCell.columnKey) ?? '=',
+    ).value
 
-  if (!inlineFormulaValue.value) {
+  if (!resolveRawCellFormulaValue(targetCell.rowIndex, targetCell.columnKey)) {
     clearInlineFormulaComposer()
     return
   }
@@ -1215,7 +1318,7 @@ function handleInlineFormulaScroll() {
 }
 
 function handleUseFormulaHelpExample(example: string) {
-  inlineFormulaValue.value = example
+  inlineFormulaValue.value = coerceFormulaEditorState(example).value
   refreshInlineFormulaComposer(true)
 }
 
@@ -1625,15 +1728,17 @@ async function runGridHistoryAction(direction: 'undo' | 'redo') {
 }
 
 function publishDraft(columns: SheetGridColumn[], rows: GridRow[]) {
+  const context = getSheetDraftContext()
   const payload = buildDraftPayload(columns, rows)
   queuedGridPayload.value = payload
-  emit('dirtyChange', Boolean(payload))
-  emit('draftChange', payload)
+  emit('dirtyChange', Boolean(payload), context)
+  emit('draftChange', payload, context)
 }
 
 function scheduleDraftChange() {
+  const context = getSheetDraftContext()
   queuedGridPayload.value = buildDraftPayload(readGridColumns(), readGridRows())
-  emit('dirtyChange', Boolean(queuedGridPayload.value))
+  emit('dirtyChange', Boolean(queuedGridPayload.value), context)
   clearSyncTimer()
   syncTimer.value = window.setTimeout(() => {
     flushDraftChange()
@@ -1641,11 +1746,19 @@ function scheduleDraftChange() {
 }
 
 function flushDraftChange() {
+  const context = getSheetDraftContext()
   clearSyncTimer()
   const payload = queuedGridPayload.value ?? getCurrentDraft()
   queuedGridPayload.value = null
-  emit('dirtyChange', Boolean(payload))
-  emit('draftChange', payload)
+  emit('dirtyChange', Boolean(payload), context)
+  emit('draftChange', payload, context)
+}
+
+function getSheetDraftContext(): SheetDraftContext {
+  return {
+    workspaceId: props.workspaceId,
+    sheetId: props.sheetId,
+  }
 }
 
 function clearSyncTimer() {
@@ -2345,8 +2458,11 @@ defineExpose<SheetStageHandle>({
                 autocomplete="off"
                 autocorrect="off"
                 @focus="handleInlineFormulaFocus"
+                @click="syncInlineFormulaCaretBoundary"
                 @input="handleInlineFormulaInput"
                 @keydown="handleInlineFormulaKeydown"
+                @keyup="syncInlineFormulaCaretBoundary"
+                @select="syncInlineFormulaCaretBoundary"
                 @scroll="handleInlineFormulaScroll"
               />
             </div>

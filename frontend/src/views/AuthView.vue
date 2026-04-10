@@ -93,13 +93,22 @@ async function handleVerificationToken(value: unknown) {
       <form class="auth-form" @submit.prevent="submit">
         <label class="auth-form__field">
           <span>Email</span>
-          <input v-model="email" type="email" autocomplete="email" placeholder="demo@sheets.local" />
+          <input
+            id="auth-email"
+            v-model="email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            placeholder="demo@sheets.local"
+          />
         </label>
 
         <label class="auth-form__field">
           <span>Password</span>
           <input
+            id="auth-password"
             v-model="password"
+            name="password"
             type="password"
             autocomplete="current-password"
             placeholder="Minimum 8 characters"

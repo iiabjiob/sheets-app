@@ -20,6 +20,11 @@ interface SheetStageHandle {
   markCommitted(payload: SheetGridUpdateInput): void
 }
 
+interface SheetDraftContext {
+  workspaceId: string | null
+  sheetId: string | null
+}
+
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -145,9 +150,18 @@ const {
   requestDialogClose: requestUnsavedChangesDialogClose,
   saveChangesAndLeave,
   leaveWithoutSaving,
+  skipNextRouteGuard,
 } = useUnsavedChangesPrompt({
   hasUnsavedChanges: hasUnsavedGridChanges,
   saveChanges: saveActiveSheetDraft,
+  awaitPendingSave: async () => {
+    if (activeGridSavePromise.value) {
+      await activeGridSavePromise.value
+    }
+  },
+  discardChanges: () => {
+    resetPendingGridState()
+  },
 })
 
 onMounted(async () => {
@@ -159,6 +173,7 @@ onMounted(async () => {
 watch(
   () => [workspacesStore.activeWorkspaceId, workspacesStore.activeSheetId],
   () => {
+    resetPendingGridState()
     syncRoute()
   },
 )
@@ -179,6 +194,7 @@ watch(
 function syncRoute() {
   if (!workspacesStore.activeWorkspaceId || !workspacesStore.activeSheetId) {
     if (route.name !== 'workspaces') {
+      skipNextRouteGuard()
       void router.replace({ name: 'workspaces' })
     }
     return
@@ -188,6 +204,7 @@ function syncRoute() {
     return
   }
 
+  skipNextRouteGuard()
   void router.replace({
     name: 'sheet',
     params: {
@@ -384,9 +401,13 @@ async function handleTreeSheetDelete(workspaceId: string, sheetId: string) {
   })
 }
 
-function handleSheetGridDraftChange(payload: SheetGridUpdateInput | null) {
-  pendingGridDraftWorkspaceId.value = workspacesStore.activeWorkspaceId
-  pendingGridDraftSheetId.value = workspacesStore.activeSheetId
+function handleSheetGridDraftChange(payload: SheetGridUpdateInput | null, context: SheetDraftContext) {
+  if (!matchesActiveSheetContext(context)) {
+    return
+  }
+
+  pendingGridDraftWorkspaceId.value = context.workspaceId
+  pendingGridDraftSheetId.value = context.sheetId
   pendingGridDraft.value = payload
 
   if (payload) {
@@ -394,14 +415,36 @@ function handleSheetGridDraftChange(payload: SheetGridUpdateInput | null) {
   }
 }
 
-function handleSheetGridDirtyChange(value: boolean) {
-  pendingGridDraftWorkspaceId.value = workspacesStore.activeWorkspaceId
-  pendingGridDraftSheetId.value = workspacesStore.activeSheetId
+function handleSheetGridDirtyChange(value: boolean, context: SheetDraftContext) {
+  if (!matchesActiveSheetContext(context)) {
+    return
+  }
+
+  pendingGridDraftWorkspaceId.value = context.workspaceId
+  pendingGridDraftSheetId.value = context.sheetId
   pendingGridDirty.value = value
 
   if (value) {
     sheetSaveError.value = null
   }
+}
+
+function matchesActiveSheetContext(context: SheetDraftContext) {
+  return (
+    context.workspaceId === workspacesStore.activeWorkspaceId &&
+    context.sheetId === workspacesStore.activeSheetId
+  )
+}
+
+function resetPendingGridState(context: SheetDraftContext = {
+  workspaceId: workspacesStore.activeWorkspaceId,
+  sheetId: workspacesStore.activeSheetId,
+}) {
+  pendingGridDraftWorkspaceId.value = context.workspaceId
+  pendingGridDraftSheetId.value = context.sheetId
+  pendingGridDraft.value = null
+  pendingGridDirty.value = false
+  sheetSaveError.value = null
 }
 
 async function saveActiveSheetDraft() {

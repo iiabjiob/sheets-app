@@ -1,7 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AuthView from '@/views/AuthView.vue'
-import CollectionView from '@/views/CollectionView.vue'
-import WorkspaceView from '@/views/WorkspaceView.vue'
+
+const AuthView = () => import('@/views/AuthView.vue')
+const CollectionView = () => import('@/views/CollectionView.vue')
+const WorkspaceView = () => import('@/views/WorkspaceView.vue')
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),

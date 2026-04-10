@@ -4,6 +4,8 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 export function useUnsavedChangesPrompt(options: {
   hasUnsavedChanges: { value: boolean }
   saveChanges: () => Promise<boolean>
+  awaitPendingSave?: () => Promise<void>
+  discardChanges?: () => void | Promise<void>
 }) {
   const prompt = reactive({
     dialogOpen: false,
@@ -30,6 +32,10 @@ export function useUnsavedChangesPrompt(options: {
     if (skipNextRouteGuardCount > 0) {
       skipNextRouteGuardCount -= 1
       return true
+    }
+
+    if (options.awaitPendingSave) {
+      await options.awaitPendingSave()
     }
 
     if (!options.hasUnsavedChanges.value) {
@@ -64,10 +70,12 @@ export function useUnsavedChangesPrompt(options: {
     }
   }
 
-  function leaveWithoutSaving() {
+  async function leaveWithoutSaving() {
     if (prompt.dialogSaving) {
       return
     }
+
+    await options.discardChanges?.()
 
     const resolver = pendingLeaveResolver
     pendingLeaveResolver = null
@@ -105,11 +113,16 @@ export function useUnsavedChangesPrompt(options: {
   onBeforeRouteLeave(async () => await confirmLeave())
   onBeforeRouteUpdate(async () => await confirmLeave())
 
+  function skipNextRouteGuard() {
+    skipNextRouteGuardCount += 1
+  }
+
   return {
     prompt,
     confirmLeave,
     requestDialogClose,
     saveChangesAndLeave,
     leaveWithoutSaving,
+    skipNextRouteGuard,
   }
 }

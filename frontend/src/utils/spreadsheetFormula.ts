@@ -125,6 +125,12 @@ interface SpreadsheetFormulaComputationState {
   tableContexts: Map<string, DataGridFormulaTableRowsSource<GridRow>>
 }
 
+interface SpreadsheetFormulaErrorValue {
+  kind: 'error'
+  code: string
+  message: string
+}
+
 const compiledFormulaCache = new Map<string, DataGridCompiledFormulaField<GridRow>>()
 
 export const FORMULA_REFERENCE_OPTIONS = {
@@ -584,7 +590,12 @@ function resolveReferenceValue(
     currentSheet,
   )
   if (!targetSheet) {
-    return null
+    return createFormulaErrorValue(
+      'REF',
+      sheetReference
+        ? `Sheet "${sheetReference}" no longer exists.`
+        : 'Referenced sheet no longer exists.',
+    )
   }
 
   const columnKey = resolveReferenceColumnKey(
@@ -593,12 +604,18 @@ function resolveReferenceValue(
     targetSheet.columnLookup,
   )
   if (!columnKey) {
-    return null
+    return createFormulaErrorValue(
+      'REF',
+      `Column "${referenceName}" does not exist on sheet "${targetSheet.name}".`,
+    )
   }
 
   const rowIndices = resolveRowIndices(rowSelector, currentRowIndex, targetSheet.rows.length)
   if (!rowIndices.length) {
-    return null
+    return createFormulaErrorValue(
+      'REF',
+      `Referenced row does not exist on sheet "${targetSheet.name}".`,
+    )
   }
 
   const values = rowIndices.map((rowIndex) =>
@@ -1314,6 +1331,14 @@ function normalizeComputedCellResult(
   }
 }
 
+function createFormulaErrorValue(code: string, message: string): SpreadsheetFormulaErrorValue {
+  return {
+    kind: 'error',
+    code,
+    message,
+  }
+}
+
 function formulaValueToDisplay(value: unknown): string {
   if (value === null || value === undefined) {
     return ''
@@ -1355,7 +1380,7 @@ function asString(value: unknown) {
   return String(value)
 }
 
-function isFormulaErrorValue(value: unknown): value is { kind: 'error'; code: string; message: string } {
+function isFormulaErrorValue(value: unknown): value is SpreadsheetFormulaErrorValue {
   return (
     typeof value === 'object' &&
     value !== null &&

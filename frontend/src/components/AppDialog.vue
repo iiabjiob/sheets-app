@@ -37,6 +37,9 @@ const dialog = useDialogController({
 })
 
 const isOpen = computed(() => props.modelValue)
+const inputFieldBase = computed(() => slugify(props.title) || 'dialog-name')
+const inputFieldId = computed(() => `${inputFieldBase.value}-input`)
+const inputFieldName = computed(() => `${inputFieldBase.value}-name`)
 
 watch(isOpen, async (open) => {
   if (open && !dialog.snapshot.value.isOpen) {
@@ -89,6 +92,14 @@ function submit() {
 
   emit('submit', inputValue.value.trim())
 }
+
+function slugify(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
 </script>
 
 <template>
@@ -119,6 +130,8 @@ function submit() {
             <input
               ref="inputRef"
               v-model="inputValue"
+              :id="inputFieldId"
+              :name="inputFieldName"
               class="dialog-input"
               type="text"
               placeholder="Start with something clear"
