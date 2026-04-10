@@ -5,61 +5,46 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import tailwindcss from '@tailwindcss/vite'
 
-function resolveNodeModulePackageName(id: string) {
-  const nodeModulesMarker = '/node_modules/'
-  const markerIndex = id.lastIndexOf(nodeModulesMarker)
-  const modulePath = markerIndex >= 0 ? id.slice(markerIndex + nodeModulesMarker.length) : ''
-  const segments = modulePath.split('/').filter(Boolean)
-  if (segments.length === 0) {
-    return null
-  }
-
-  if (segments[0]?.startsWith('@') && segments[1]) {
-    return `${segments[0]}/${segments[1]}`
-  }
-
-  return segments[0] ?? null
-}
-
-function toChunkName(packageName: string) {
-  return `pkg-${packageName.replace('@', '').replace(/[\/]/g, '-')}`
-}
-
-function resolveDatagridCoreChunk(id: string) {
-  const packageRoot = '@affino/datagrid-core'
-  if (!id.includes(packageRoot)) {
-    return null
-  }
-
-  const distSourceMarker = '/dist/src/'
-  const markerIndex = id.indexOf(distSourceMarker)
-  if (markerIndex < 0) {
-    return 'pkg-affino-datagrid-core'
-  }
-
-  const sourcePath = id.slice(markerIndex + distSourceMarker.length)
-  const [firstSegment = 'core'] = sourcePath.split('/')
-  const segmentName = firstSegment.replace(/\.[cm]?[jt]s$/, '')
-
-  if (!segmentName || segmentName === 'index' || segmentName === 'public' || segmentName === 'internal') {
-    return 'pkg-affino-datagrid-core'
-  }
-
-  return `pkg-affino-datagrid-core-${segmentName}`
-}
-
 function resolveManualChunk(id: string) {
   if (!id.includes('node_modules')) {
     return undefined
   }
 
-  const datagridCoreChunk = resolveDatagridCoreChunk(id)
-  if (datagridCoreChunk) {
-    return datagridCoreChunk
+  if (id.includes('@affino/datagrid-core/dist/src/models/')) {
+    return 'affino-datagrid-core-models'
   }
 
-  if (id.includes('@affino/datagrid-vue-app') || id.includes('@affino/datagrid-formula-engine')) {
-    return 'affino-datagrid'
+  if (id.includes('@affino/datagrid-core/dist/src/core/')) {
+    return 'affino-datagrid-core-core'
+  }
+
+  if (id.includes('@affino/datagrid-gantt')) {
+    return 'affino-datagrid-gantt'
+  }
+
+  if (id.includes('@affino/datagrid-vue-app')) {
+    return 'affino-datagrid-app'
+  }
+
+  if (id.includes('@affino/datagrid-formula-engine')) {
+    return 'affino-datagrid-formula'
+  }
+
+  if (id.includes('@affino/datagrid-vue')) {
+    return 'affino-datagrid-vue'
+  }
+
+  if (id.includes('@affino/datagrid-orchestration')) {
+    return 'affino-datagrid-orchestration'
+  }
+
+  if (
+    id.includes('@affino/datagrid-theme') ||
+    id.includes('@affino/datagrid-chrome') ||
+    id.includes('@affino/datagrid-format') ||
+    id.includes('@affino/datagrid-pivot')
+  ) {
+    return 'affino-datagrid-support'
   }
 
   if (
@@ -78,8 +63,7 @@ function resolveManualChunk(id: string) {
     return 'vue-core'
   }
 
-  const packageName = resolveNodeModulePackageName(id)
-  return packageName ? toChunkName(packageName) : 'vendor'
+  return undefined
 }
 
 // https://vite.dev/config/
