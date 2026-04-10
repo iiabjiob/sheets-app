@@ -8,6 +8,33 @@ importers:
 
   .:
     dependencies:
+      '@affino/combobox-vue':
+        specifier: ^0.1.0
+        version: 0.1.0(vue@3.5.26(typescript@5.9.3))
+      '@affino/datagrid-formula-engine':
+        specifier: ^0.1.1
+        version: 0.1.1
+      '@affino/datagrid-vue-app':
+        specifier: ^0.1.25
+        version: 0.1.25(@affino/menu-core@1.1.0)(pinia@3.0.4(typescript@5.9.3)(vue@3.5.26(typescript@5.9.3)))(vue@3.5.26(typescript@5.9.3))
+      '@affino/dialog-vue':
+        specifier: ^1.1.0
+        version: 1.1.0(vue@3.5.26(typescript@5.9.3))
+      '@affino/menu-vue':
+        specifier: ^2.1.1
+        version: 2.1.1(@affino/menu-core@1.1.0)(vue@3.5.26(typescript@5.9.3))
+      '@affino/overlay-host':
+        specifier: ^1.1.0
+        version: 1.1.0
+      '@affino/popover-vue':
+        specifier: ^1.1.0
+        version: 1.1.0(vue@3.5.26(typescript@5.9.3))
+      '@affino/tooltip-vue':
+        specifier: ^1.0.0
+        version: 1.0.0(vue@3.5.26(typescript@5.9.3))
+      '@affino/treeview-vue':
+        specifier: ^0.1.0
+        version: 0.1.0(vue@3.5.26(typescript@5.9.3))
       '@tailwindcss/vite':
         specifier: ^4.1.18
         version: 4.1.18(vite@7.3.0(@types/node@24.10.4)(jiti@2.6.1)(lightningcss@1.30.2))
@@ -71,6 +98,127 @@ importers:
         version: 3.1.8(typescript@5.9.3)
 
 packages:
+
+  '@affino/combobox-core@0.1.1':
+    resolution: {integrity: sha512-yjpQdtMtCrbRbK3n0TNDToYN2XxblPuJ8sQLknUiYTjHsQqLsT8JuTBJEcrP3vFMTVwtrVfA5C+7ENL3B3Pf6Q==}
+
+  '@affino/combobox-vue@0.1.0':
+    resolution: {integrity: sha512-/tD7noWP3iB3CFmVRjV2O1Sgb/HIeuPbonk1xIRfXtIuiNh19/5lHyC1t87iDC/GKUzejQoBEBMVh3atmLAn0Q==}
+    peerDependencies:
+      vue: ^3.3.0
+
+  '@affino/datagrid-chrome@0.1.1':
+    resolution: {integrity: sha512-E7ozKId2ATFLlwo2LcOgkCi3A/5q56fP4O8JZ6EtNcLhdiv43HYO1X1i9T+mx5y1peRHUHHqyVIiTmhVK+EHjg==}
+
+  '@affino/datagrid-core@0.3.3':
+    resolution: {integrity: sha512-bd8Bxp88eGEjSGcAkG7bJHmygQMHIgdq5AMSxUTQgPQmKEZbQWQtBrwK+YjWkVSdV7uWZQvJ4j8dB5FE9vAQuw==}
+
+  '@affino/datagrid-core@0.3.8':
+    resolution: {integrity: sha512-4aiC2riR45egImhJeAcHfNYhG/jBG2/HtBdk4nk1srt5F0lBwd8b1IzycNcypEt+gWXP3JLWpEKutOlTReVXEg==}
+
+  '@affino/datagrid-core@0.3.9':
+    resolution: {integrity: sha512-mL6FuqMs2oL5l3wJ/pCJTkKGn/3MAM0L+OqKQ7SRjVxobEsJc8vveetLpCvq112PE53dIM8rqpKysStpNAIxnw==}
+
+  '@affino/datagrid-format@0.1.1':
+    resolution: {integrity: sha512-mAmBJmE1rAYTbZ70gR5aM/tDPs8dj273bUXwPLk8swtnTzqzKGyuUQEgFAk43nFbKG5DdS4sOuaBcj7fXK5K4g==}
+
+  '@affino/datagrid-formula-engine@0.1.1':
+    resolution: {integrity: sha512-UPSD6Mr81nQhJiYN+3o1Y8CMbTOc7Lg81oNeBjHHBU2P72wq1Gq4EuVOWQUnWSxNxpZfxe7KPV1htGkvWOM6nA==}
+
+  '@affino/datagrid-gantt@0.1.1':
+    resolution: {integrity: sha512-ATrOC7yM4y1NRDc7IYFP2+k4/pKrsF+M6p2CZJjkELU3wLXWK0bmW1bm9N6PN+9se8pR746c5z3I8jCnonSwEQ==}
+
+  '@affino/datagrid-orchestration@0.3.6':
+    resolution: {integrity: sha512-3KSZG9aWYEBQJd54+f1WySgS10Y6GrrdOYZXVeo4bXgexU/1zkM2CReYDjAg8BvBN4na+/MwLJPQw5myW26isg==}
+
+  '@affino/datagrid-pivot@0.1.1':
+    resolution: {integrity: sha512-98ukH9cAb73l0fNvFvyjEQfP2m1RzFaCGN++tCVX3t1e0QrspdJ+TPybc79/PQ3t7ih1Ymyq9GStaOBokmdorg==}
+
+  '@affino/datagrid-plugins@0.2.2':
+    resolution: {integrity: sha512-r7DGmiGnycKet0UQ02eGo3hT4mJAo/Z3UZcLuXXJROuKmjZYYwb17x9JXBa3CDJ9Mg7UOHaKNqQvzT0xlEv3FA==}
+
+  '@affino/datagrid-theme@0.2.2':
+    resolution: {integrity: sha512-ewT5ndwfv+iFCckOEpvi6Brnw4vhuWH2OaOV1zHkr8DnvtjLDg5HJFwDZEuUOt8K6suC/uF5BBzzA1G/9ALrwQ==}
+
+  '@affino/datagrid-vue-app@0.1.25':
+    resolution: {integrity: sha512-zqgurwmSkVkbUGQDRHehc8OdyGWlGATYw8e8CT80VkdrGrXtrO+wBYo7zyGM/DXSWSD2q1Rf+ifBSg2iM9QgGA==}
+    peerDependencies:
+      vue: ^3.3.0
+
+  '@affino/datagrid-vue@0.3.16':
+    resolution: {integrity: sha512-zU8MkinIWi5cT0Pve0Dj3qf2zLiGGZwNvQW3tDmMgilW6icTJhdR2u5lgADRLxT7Pdc5b7oupX+vi6aNlFS0Aw==}
+    peerDependencies:
+      '@affino/datagrid-theme': ^0.2.2
+      pinia: ^2.1.0 || ^3.0.0
+      vue: ^3.3.0
+    peerDependenciesMeta:
+      '@affino/datagrid-theme':
+        optional: true
+
+  '@affino/datagrid-worker@0.1.1':
+    resolution: {integrity: sha512-F5v/BoQujTCHgJXYMVv9pWtpdrMONL7W2hethD1vLSQvPmeSvEMqUfYBBWM+NkElVLQ9UjOhtoVQocI8ttYIBA==}
+
+  '@affino/dialog-core@1.1.0':
+    resolution: {integrity: sha512-fmXJ2qN0q6A6kLszfEv55IKop+cVpAwf0kSjF1uBaxnDzLdhjzwtr56Q6sQJtXtujOdfiX/APKHU3oafo9cgnw==}
+
+  '@affino/dialog-vue@1.1.0':
+    resolution: {integrity: sha512-80MKrX9H+YQ/5v3otx6SDGV/ew6CxsAVKwHOAFLESlTR7+ZqsFmJ1iTm2eNWXeplYr6Okn58Q+xKEd9/9lloow==}
+    peerDependencies:
+      vue: ^3.3.0
+
+  '@affino/focus-utils@1.1.0':
+    resolution: {integrity: sha512-DjE9w0WLlqmtjSXbmzf2y0WNGvhQ1hTIhkiRV8DPsCmKKXREr/6sm8Yc5PrCLqzuawdYUDzyDBEPxFqhMJOOCg==}
+
+  '@affino/listbox-core@1.1.0':
+    resolution: {integrity: sha512-qJbLMSpmTmcCq9hfPulLn0LYvl6k4onX6ibQiM4TRtlo682JBt0UYJ3w0M5rYtd9Ze2FuD8x1WITuvUNCeoFUw==}
+
+  '@affino/menu-core@1.1.0':
+    resolution: {integrity: sha512-8kXmr/ryhzXSSCF/ew813IhBr2LKztW4+hdpQzKptZnAO3oh8TIB2bY/nFpweVb4Nbl7GZtw+ZXKdKHLTKWpBw==}
+
+  '@affino/menu-vue@2.1.1':
+    resolution: {integrity: sha512-83fDTTpdJC8spvtFst6wz6nodKYOawFNxGb4OB2FG7K+qElMxqD/3PJhaiRktM7qtJgwCk0+PguCuMJSAQGgSQ==}
+    peerDependencies:
+      '@affino/menu-core': ^1.1.0
+      vue: ^3.3.0
+
+  '@affino/overlay-host@1.1.0':
+    resolution: {integrity: sha512-f1adFx/bnNuO/Z4CSeUvGtLyr09/4zDIHpJuVs8LgCEsM1hXrxX6aJ4Qir5ujI1j/y5S+R1G22fapANDYMikWQ==}
+
+  '@affino/overlay-kernel@0.2.0':
+    resolution: {integrity: sha512-yPbhRuzMKBuUEDVM8ZhKTQcWH9jonuhTEaG6UXlpYaLNNiaWofYmmqOuP3J46ZZmlbHZInXIGFNuXo5LdhzeCg==}
+
+  '@affino/popover-core@1.1.0':
+    resolution: {integrity: sha512-cURD9EpEKijS+IUWtQ+boKo2k9FAmcmMmdmNCV2UcLbKAtAWyX2YhEZvpnjdIqUekHut4xN+n7YOeTNNfzQmjQ==}
+
+  '@affino/popover-vue@1.1.0':
+    resolution: {integrity: sha512-7sqZuhoGc/aJggYUJ0pU8FqAMdrAcK/utcYGovP9+jiNqOxAraxopowjDFCyj5830RoJJ2epbxV3sM/VZ5h+QA==}
+    peerDependencies:
+      vue: ^3.3.0
+
+  '@affino/projection-engine@0.2.2':
+    resolution: {integrity: sha512-nHw1bl3gkZeq2R6y7T5O4tZ3ur9XCBR9MY8BQy7wIWBEzIs26R54+KYim81AFVNc4zFwl0Iyr2nI6Yg4Lo/QGA==}
+
+  '@affino/selection-core@1.1.1':
+    resolution: {integrity: sha512-mwP4URl+AuDsMdg9InkYcKIH367U+CdL/jPkBX74Wh4q/AaRhz0GMpe98DOF1O0fB/5p5vIxdFGA06qEx/5GTg==}
+
+  '@affino/surface-core@1.1.0':
+    resolution: {integrity: sha512-9BtgLjWR6brOMMb+QQc6nlX0dY5nS1IgYZL3BhTO56Dt9XJpy0/uu00AW5dHnAIqku5VlZx1hmIW3vEBd/CWCw==}
+
+  '@affino/tooltip-core@1.0.0':
+    resolution: {integrity: sha512-taq3oyVo5yzOF8dKa9N9oTK6wVVBBl8qvdVZ3oL/C4uM1KSWXy+ugCRLIOMC8gs8l4iQSvmTHgsFJop2ORgOPQ==}
+
+  '@affino/tooltip-vue@1.0.0':
+    resolution: {integrity: sha512-PbRciAFOercOUYjiZH56XA0IXhzuOxigQsfvmzD9xosz9p2sVCcpMe95q0pnxJodbr4CtsarYC6XSC4saML7ow==}
+    peerDependencies:
+      vue: ^3.3.0
+
+  '@affino/treeview-core@0.1.1':
+    resolution: {integrity: sha512-AsYmHH4QGFHqNtzljFJJgmxPvTLV3xLHexCVBxOJAJ4NqKuupSGKAeIa/LsGPUnrXN0N4wiqo0+up8/kQgjK3w==}
+
+  '@affino/treeview-vue@0.1.0':
+    resolution: {integrity: sha512-QT5d6Cs8Sq+yMrfP6Hl6DlRtfQ+f6H6US1fYz13TsewYHXJrHsSRrCtWaCqwispjrA/Tgw7SI2CrPLHJ/aAW7A==}
+    peerDependencies:
+      vue: ^3.3.0
 
   '@babel/code-frame@7.27.1':
     resolution: {integrity: sha512-cjQ7ZlQ0Mv3b47hABuTevyTuYN4i+loJKGeV9flcCgIK37cCXRh+L1bd3iBHlynerhQ7BhCkn2BPbQUL+rGqFg==}
@@ -1767,6 +1915,158 @@ packages:
     engines: {node: '>=10'}
 
 snapshots:
+
+  '@affino/combobox-core@0.1.1':
+    dependencies:
+      '@affino/listbox-core': 1.1.0
+      '@affino/selection-core': 1.1.1
+
+  '@affino/combobox-vue@0.1.0(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/combobox-core': 0.1.1
+      vue: 3.5.26(typescript@5.9.3)
+
+  '@affino/datagrid-chrome@0.1.1': {}
+
+  '@affino/datagrid-core@0.3.3':
+    dependencies:
+      '@affino/datagrid-format': 0.1.1
+      '@affino/datagrid-formula-engine': 0.1.1
+      '@affino/datagrid-pivot': 0.1.1
+      '@affino/datagrid-plugins': 0.2.2
+      '@affino/projection-engine': 0.2.2
+
+  '@affino/datagrid-core@0.3.8':
+    dependencies:
+      '@affino/datagrid-format': 0.1.1
+      '@affino/datagrid-formula-engine': 0.1.1
+      '@affino/datagrid-pivot': 0.1.1
+      '@affino/datagrid-plugins': 0.2.2
+      '@affino/projection-engine': 0.2.2
+
+  '@affino/datagrid-core@0.3.9':
+    dependencies:
+      '@affino/datagrid-format': 0.1.1
+      '@affino/datagrid-formula-engine': 0.1.1
+      '@affino/datagrid-pivot': 0.1.1
+      '@affino/datagrid-plugins': 0.2.2
+      '@affino/projection-engine': 0.2.2
+
+  '@affino/datagrid-format@0.1.1': {}
+
+  '@affino/datagrid-formula-engine@0.1.1': {}
+
+  '@affino/datagrid-gantt@0.1.1':
+    dependencies:
+      '@affino/datagrid-core': 0.3.3
+
+  '@affino/datagrid-orchestration@0.3.6':
+    dependencies:
+      '@affino/datagrid-core': 0.3.8
+
+  '@affino/datagrid-pivot@0.1.1': {}
+
+  '@affino/datagrid-plugins@0.2.2': {}
+
+  '@affino/datagrid-theme@0.2.2': {}
+
+  '@affino/datagrid-vue-app@0.1.25(@affino/menu-core@1.1.0)(pinia@3.0.4(typescript@5.9.3)(vue@3.5.26(typescript@5.9.3)))(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/datagrid-chrome': 0.1.1
+      '@affino/datagrid-gantt': 0.1.1
+      '@affino/datagrid-theme': 0.2.2
+      '@affino/datagrid-vue': 0.3.16(@affino/datagrid-theme@0.2.2)(pinia@3.0.4(typescript@5.9.3)(vue@3.5.26(typescript@5.9.3)))(vue@3.5.26(typescript@5.9.3))
+      '@affino/menu-vue': 2.1.1(@affino/menu-core@1.1.0)(vue@3.5.26(typescript@5.9.3))
+      '@affino/popover-vue': 1.1.0(vue@3.5.26(typescript@5.9.3))
+      vue: 3.5.26(typescript@5.9.3)
+    transitivePeerDependencies:
+      - '@affino/menu-core'
+      - pinia
+
+  '@affino/datagrid-vue@0.3.16(@affino/datagrid-theme@0.2.2)(pinia@3.0.4(typescript@5.9.3)(vue@3.5.26(typescript@5.9.3)))(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/datagrid-core': 0.3.9
+      '@affino/datagrid-orchestration': 0.3.6
+      '@affino/datagrid-pivot': 0.1.1
+      '@affino/datagrid-worker': 0.1.1
+      pinia: 3.0.4(typescript@5.9.3)(vue@3.5.26(typescript@5.9.3))
+      vue: 3.5.26(typescript@5.9.3)
+    optionalDependencies:
+      '@affino/datagrid-theme': 0.2.2
+
+  '@affino/datagrid-worker@0.1.1':
+    dependencies:
+      '@affino/datagrid-core': 0.3.3
+      '@affino/datagrid-formula-engine': 0.1.1
+
+  '@affino/dialog-core@1.1.0':
+    dependencies:
+      '@affino/surface-core': 1.1.0
+
+  '@affino/dialog-vue@1.1.0(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/dialog-core': 1.1.0
+      vue: 3.5.26(typescript@5.9.3)
+
+  '@affino/focus-utils@1.1.0': {}
+
+  '@affino/listbox-core@1.1.0':
+    dependencies:
+      '@affino/selection-core': 1.1.1
+
+  '@affino/menu-core@1.1.0':
+    dependencies:
+      '@affino/overlay-kernel': 0.2.0
+      '@affino/surface-core': 1.1.0
+
+  '@affino/menu-vue@2.1.1(@affino/menu-core@1.1.0)(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/focus-utils': 1.1.0
+      '@affino/menu-core': 1.1.0
+      '@affino/overlay-host': 1.1.0
+      '@affino/overlay-kernel': 0.2.0
+      vue: 3.5.26(typescript@5.9.3)
+
+  '@affino/overlay-host@1.1.0': {}
+
+  '@affino/overlay-kernel@0.2.0': {}
+
+  '@affino/popover-core@1.1.0':
+    dependencies:
+      '@affino/overlay-kernel': 0.2.0
+      '@affino/surface-core': 1.1.0
+
+  '@affino/popover-vue@1.1.0(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/overlay-host': 1.1.0
+      '@affino/overlay-kernel': 0.2.0
+      '@affino/popover-core': 1.1.0
+      vue: 3.5.26(typescript@5.9.3)
+
+  '@affino/projection-engine@0.2.2': {}
+
+  '@affino/selection-core@1.1.1': {}
+
+  '@affino/surface-core@1.1.0': {}
+
+  '@affino/tooltip-core@1.0.0':
+    dependencies:
+      '@affino/surface-core': 1.1.0
+
+  '@affino/tooltip-vue@1.0.0(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/overlay-host': 1.1.0
+      '@affino/tooltip-core': 1.0.0
+      vue: 3.5.26(typescript@5.9.3)
+
+  '@affino/treeview-core@0.1.1':
+    dependencies:
+      '@affino/projection-engine': 0.2.2
+
+  '@affino/treeview-vue@0.1.0(vue@3.5.26(typescript@5.9.3))':
+    dependencies:
+      '@affino/treeview-core': 0.1.1
+      vue: 3.5.26(typescript@5.9.3)
 
   '@babel/code-frame@7.27.1':
     dependencies:

@@ -71,3 +71,5 @@ htmlcov/
 /cypress/videos/
 /cypress/screenshots/
 __screenshots__/
+
+.refs/
