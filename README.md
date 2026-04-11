@@ -156,6 +156,8 @@ docker compose -f docker-compose.prod.yml up --build -d
 
 The production compose stack runs a dedicated one-shot `migrations` service before starting the backend.
 
+Important: PostgreSQL applies `POSTGRES_*` bootstrap variables only when the data volume is initialized for the first time. If you change database credentials later, an existing production volume keeps the old user/password until you either recreate the volume or update the role inside PostgreSQL manually.
+
 Application URLs:
 
 - `http://localhost:8080` for the web app
