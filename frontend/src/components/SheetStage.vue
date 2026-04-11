@@ -26,6 +26,7 @@ import {
   buildSpreadsheetFormulaCellResults,
   isSpreadsheetFormulaValue,
   normalizeSpreadsheetFormulaExpression,
+  type SpreadsheetFormulaCellResult,
   type SpreadsheetFormulaReferenceOccurrence,
   type SpreadsheetFormulaReferenceTarget,
   type SpreadsheetFormulaWorkbookSheet,
@@ -278,12 +279,17 @@ const renameColumnInitialValue = ref('')
 const gridSelectionSnapshot = ref<GridSelectionSnapshotLike | null>(null)
 const inlineFormulaCell = ref<InlineFormulaCellState | null>(null)
 const inlineFormulaValue = ref('')
+const inlineFormulaInitialValue = ref('')
 const inlineFormulaInputRef = ref<HTMLTextAreaElement | null>(null)
 const inlineFormulaHighlightRef = ref<HTMLElement | null>(null)
 const inlineFormulaPanelRef = ref<HTMLElement | null>(null)
 const inlineFormulaSyncFrame = ref<number | null>(null)
+const gridEditorSyncFrame = ref<number | null>(null)
+const inlineFormulaHistoryBeforeSnapshot = ref<GridHistorySnapshot | null>(null)
 const dismissedInlineFormulaCellKey = ref<string | null>(null)
 const formulaReferencePointerState = ref<FormulaReferencePointerState | null>(null)
+const isGridCellEditorActive = ref(false)
+const lastStableFormulaCellResults = ref<Map<string, SpreadsheetFormulaCellResult>>(new Map())
 let formulaHighlightObserver: MutationObserver | null = null
 
 const gridRows = computed<GridRow[]>(() => inputRows.value)
@@ -425,9 +431,7 @@ const inlineFormulaHasDraftChanges = computed(() => {
     return false
   }
 
-  const persistedValue =
-    resolveRawCellFormulaValue(inlineFormulaCell.value.rowIndex, inlineFormulaCell.value.columnKey) ?? ''
-  return inlineFormulaValue.value !== persistedValue
+  return inlineFormulaValue.value !== inlineFormulaInitialValue.value
 })
 const inlineFormulaCanApply = computed(
   () =>
@@ -452,6 +456,8 @@ watch(
       columns: inputColumns.value,
       rows: inputRows.value,
     })
+    lastStableFormulaCellResults.value = new Map()
+    isGridCellEditorActive.value = false
     emit('draftChange', null, context)
     emit('dirtyChange', false, context)
   },
@@ -460,7 +466,14 @@ watch(
 
 watch(
   () => formulaCellResults.value,
-  () => {
+  (results) => {
+    const nextStableResults = new Map<string, SpreadsheetFormulaCellResult>()
+    results.forEach((result, cellKey) => {
+      if (!result.error) {
+        nextStableResults.set(cellKey, result)
+      }
+    })
+    lastStableFormulaCellResults.value = nextStableResults
     void nextTick(() => {
       refreshFormulaCells()
     })
@@ -497,6 +510,7 @@ watch(
   () => {
     void nextTick(() => {
       refreshFormulaCells()
+      syncGridEditorState()
     })
 
     if (!inlineFormulaCell.value) {
@@ -523,12 +537,15 @@ function resetGridSessionState() {
   clearInlineFormulaComposer()
   clearSyncTimer()
   clearInlineFormulaSync()
+  clearGridEditorStateSync()
   gridSelectionSnapshot.value = null
+  isGridCellEditorActive.value = false
 }
 
 function teardownGridRuntime() {
   clearSyncTimer()
   clearInlineFormulaSync()
+  clearGridEditorStateSync()
   disconnectFormulaHighlightObserver()
 
   for (const dispose of gridDisposers.value) {
@@ -539,6 +556,7 @@ function teardownGridRuntime() {
   gridApi.value = null
   gridRowModel.value = null
   gridSelectionSnapshot.value = null
+  isGridCellEditorActive.value = false
 }
 
 function handleGridReady(payload: {
@@ -569,11 +587,13 @@ function handleGridReady(payload: {
     payload.api.events.on('rows:changed', handleGridRowsChanged),
     payload.api.events.on('columns:changed', handleGridColumnsChanged),
   ]
+  scheduleGridEditorStateSync()
   scheduleInlineFormulaSync()
 }
 
 function handleGridRowsChanged() {
   runtimeRows.value = readGridRows()
+  scheduleGridEditorStateSync()
   scheduleDraftChange()
   scheduleFormulaCellRefresh()
   scheduleInlineFormulaSync()
@@ -581,6 +601,7 @@ function handleGridRowsChanged() {
 
 function handleGridColumnsChanged() {
   runtimeColumns.value = readGridColumns()
+  scheduleGridEditorStateSync()
   scheduleDraftChange()
   scheduleFormulaCellRefresh()
   scheduleInlineFormulaSync()
@@ -588,6 +609,7 @@ function handleGridColumnsChanged() {
 
 function handleGridCellChange() {
   runtimeRows.value = readGridRows()
+  scheduleGridEditorStateSync()
   scheduleDraftChange()
   scheduleFormulaCellRefresh()
   scheduleInlineFormulaSync()
@@ -595,6 +617,7 @@ function handleGridCellChange() {
 
 function handleGridSelectionChange(payload: { snapshot: GridSelectionSnapshotLike | null }) {
   gridSelectionSnapshot.value = payload.snapshot
+  scheduleGridEditorStateSync()
   scheduleInlineFormulaSync()
 }
 
@@ -760,6 +783,35 @@ function clearInlineFormulaSync() {
   }
 }
 
+function syncGridEditorState() {
+  const root = gridRootRef.value
+  if (!root) {
+    isGridCellEditorActive.value = false
+    return
+  }
+
+  isGridCellEditorActive.value = Boolean(
+    root.querySelector(
+      '.grid-cell--editing .cell-editor-input, .grid-cell--editing textarea, .grid-cell--editing [contenteditable="true"]',
+    ),
+  )
+}
+
+function scheduleGridEditorStateSync() {
+  clearGridEditorStateSync()
+  gridEditorSyncFrame.value = window.requestAnimationFrame(() => {
+    gridEditorSyncFrame.value = null
+    syncGridEditorState()
+  })
+}
+
+function clearGridEditorStateSync() {
+  if (gridEditorSyncFrame.value !== null) {
+    window.cancelAnimationFrame(gridEditorSyncFrame.value)
+    gridEditorSyncFrame.value = null
+  }
+}
+
 function scheduleFormulaCellRefresh() {
   window.requestAnimationFrame(() => {
     refreshFormulaCells()
@@ -774,6 +826,8 @@ function openInlineFormulaComposer(
     draftValue ?? resolveRawCellFormulaValue(activeCell.rowIndex, activeCell.columnKey) ?? '='
   const nextState = coerceFormulaEditorState(nextValue)
   dismissedInlineFormulaCellKey.value = null
+  inlineFormulaInitialValue.value = nextState.value
+  inlineFormulaHistoryBeforeSnapshot.value = captureGridHistorySnapshot()
   inlineFormulaCell.value = {
     rowId: activeCell.rowId,
     rowIndex: activeCell.rowIndex,
@@ -841,6 +895,8 @@ function syncInlineFormulaState() {
   }
 
   dismissedInlineFormulaCellKey.value = null
+  inlineFormulaInitialValue.value = coerceFormulaEditorState(rawFormulaValue).value
+  inlineFormulaHistoryBeforeSnapshot.value = captureGridHistorySnapshot()
   inlineFormulaCell.value = {
     rowId: activeCell.rowId,
     rowIndex: activeCell.rowIndex,
@@ -854,6 +910,8 @@ function syncInlineFormulaState() {
 function clearInlineFormulaComposer() {
   inlineFormulaCell.value = null
   inlineFormulaValue.value = ''
+  inlineFormulaInitialValue.value = ''
+  inlineFormulaHistoryBeforeSnapshot.value = null
   formulaReferencePointerState.value = null
   disconnectFormulaHighlightObserver()
   void nextTick(() => {
@@ -1200,7 +1258,7 @@ function handleInlineFormulaPaneKeydown(event: KeyboardEvent) {
 
   event.preventDefault()
   event.stopPropagation()
-  closeInlineFormulaComposer()
+  revertInlineFormulaDraft()
 }
 
 function handleInlineFormulaKeydown(event: KeyboardEvent) {
@@ -1233,9 +1291,7 @@ function handleInlineFormulaKeydown(event: KeyboardEvent) {
 }
 
 function applyInlineFormulaDraft() {
-  const targetCell = inlineFormulaCell.value
-  const runtime = getGridRuntime()
-  if (!targetCell) {
+  if (!inlineFormulaCell.value) {
     return
   }
 
@@ -1253,64 +1309,22 @@ function applyInlineFormulaDraft() {
 
   dismissedInlineFormulaCellKey.value = null
   inlineFormulaValue.value = persistedValue
-  const beforeSnapshot = captureGridHistorySnapshot()
-  const didApply = runtime?.api?.rows?.applyEdits?.([
-    {
-      rowId: targetCell.rowId,
-      data: {
-        [targetCell.columnKey]: persistedValue,
-      },
-    },
-  ]) ?? false
-
-  if (!didApply) {
-    const nextRows = readGridRows().map((row) =>
-      String(row.id ?? '') === targetCell.rowId
-        ? {
-            ...row,
-            [targetCell.columnKey]: persistedValue,
-          }
-        : row,
-    )
-    applyGridStructureChange(readGridColumns(), nextRows)
-  }
-
-  recordGridHistoryTransaction('Cell edit', beforeSnapshot)
-
-  runtimeRows.value = readGridRows()
-  scheduleDraftChange()
-  scheduleFormulaCellRefresh()
-  scheduleInlineFormulaSync()
-  void nextTick(() => {
-    focusInlineFormulaInput()
-  })
+  syncInlineFormulaValueToRows(persistedValue)
+  commitInlineFormulaSession({ restoreGridFocus: true })
 }
 
 function revertInlineFormulaDraft() {
-  const targetCell = inlineFormulaCell.value
-  if (!targetCell) {
+  if (!inlineFormulaCell.value) {
     clearInlineFormulaComposer()
     return
   }
 
-  inlineFormulaValue.value =
-    coerceFormulaEditorState(
-      resolveRawCellFormulaValue(targetCell.rowIndex, targetCell.columnKey) ?? '=',
-    ).value
-
-  if (!resolveRawCellFormulaValue(targetCell.rowIndex, targetCell.columnKey)) {
-    clearInlineFormulaComposer()
-    return
-  }
-
-  void nextTick(() => {
-    focusInlineFormulaInput()
-    syncInlineFormulaScroll()
-  })
+  inlineFormulaValue.value = inlineFormulaInitialValue.value
+  dismissInlineFormulaComposer({ restoreGridFocus: true })
 }
 
 function closeInlineFormulaComposer() {
-  dismissInlineFormulaComposer({ restoreGridFocus: true })
+  commitInlineFormulaSession({ restoreGridFocus: true })
 }
 
 function handleInlineFormulaScroll() {
@@ -1320,6 +1334,88 @@ function handleInlineFormulaScroll() {
 function handleUseFormulaHelpExample(example: string) {
   inlineFormulaValue.value = coerceFormulaEditorState(example).value
   refreshInlineFormulaComposer(true)
+}
+
+function syncInlineFormulaValueToRows(rawValue: string) {
+  const targetCell = inlineFormulaCell.value
+  if (!targetCell) {
+    return
+  }
+
+  const currentColumns = readGridColumns()
+  const runtime = getGridRuntime()
+  const didApplyToRuntime =
+    runtime?.api?.rows?.applyEdits?.([
+      {
+        rowId: targetCell.rowId,
+        data: {
+          [targetCell.columnKey]: rawValue,
+        },
+      },
+    ]) ?? false
+
+  const nextRows = didApplyToRuntime
+    ? readGridRows()
+    : (() => {
+        const sourceRows = runtimeRows.value.length
+          ? runtimeRows.value
+          : inputRows.value.length
+            ? inputRows.value
+            : readGridRows()
+
+        return upsertGridCellValue(sourceRows, targetCell, rawValue)
+      })()
+
+  inputRows.value = cloneGridRows(nextRows)
+  runtimeRows.value = cloneGridRows(nextRows)
+  scheduleDraftChange(currentColumns, nextRows)
+  refreshGridCell(targetCell.rowId, targetCell.columnKey)
+  scheduleFormulaCellRefresh()
+}
+
+function upsertGridCellValue(
+  sourceRows: GridRow[],
+  targetCell: InlineFormulaCellState,
+  rawValue: string,
+) {
+  const nextRows = cloneGridRows(sourceRows)
+  let targetRowIndex = nextRows.findIndex((row) => String(row.id ?? '') === targetCell.rowId)
+  const didMaterializeMissingRow = targetRowIndex < 0
+
+  if (didMaterializeMissingRow) {
+    while (nextRows.length <= targetCell.rowIndex) {
+      nextRows.push(createEmptyRow())
+    }
+
+    targetRowIndex = Math.max(0, Math.min(targetCell.rowIndex, nextRows.length - 1))
+  }
+
+  const existingRow = nextRows[targetRowIndex] ?? createEmptyRow()
+  nextRows[targetRowIndex] = {
+    ...existingRow,
+    id: String(
+      didMaterializeMissingRow
+        ? targetCell.rowId
+        : existingRow.id ?? targetCell.rowId ?? createClientRowId(),
+    ),
+    [targetCell.columnKey]: rawValue,
+  }
+
+  return nextRows
+}
+
+function commitInlineFormulaSession(options?: { restoreGridFocus?: boolean }) {
+  const beforeSnapshot = inlineFormulaHistoryBeforeSnapshot.value
+  if (beforeSnapshot && inlineFormulaHasDraftChanges.value) {
+    const currentColumns = readGridColumns()
+    const currentRows = cloneGridRows(runtimeRows.value.length ? runtimeRows.value : inputRows.value)
+    recordGridHistoryTransaction('Cell edit', beforeSnapshot, {
+      columns: cloneGridColumns(currentColumns),
+      rows: currentRows,
+    })
+  }
+
+  dismissInlineFormulaComposer(options)
 }
 
 function syncInlineFormulaScroll() {
@@ -1465,6 +1561,26 @@ function refreshFormulaCells() {
     immediate: true,
     reason: 'spreadsheet-formula-recompute',
   })
+}
+
+function refreshGridCell(rowId: string, columnKey: string, reason = 'spreadsheet-inline-formula') {
+  const api = gridApi.value
+  if (!api?.view?.refreshCellsByRanges) {
+    return
+  }
+
+  api.view.refreshCellsByRanges(
+    [
+      {
+        rowKey: rowId,
+        columnKeys: [columnKey],
+      },
+    ],
+    {
+      immediate: true,
+      reason,
+    },
+  )
 }
 
 function readFormulaCellRefreshRanges() {
@@ -1661,7 +1777,11 @@ function clearGridHistory() {
   gridHistoryFuture.value = []
 }
 
-function recordGridHistoryTransaction(label: string, beforeSnapshot: unknown) {
+function recordGridHistoryTransaction(
+  label: string,
+  beforeSnapshot: unknown,
+  afterSnapshotOverride?: GridHistorySnapshot,
+) {
   if (isApplyingGridHistory) {
     return
   }
@@ -1671,7 +1791,7 @@ function recordGridHistoryTransaction(label: string, beforeSnapshot: unknown) {
     return
   }
 
-  const afterSnapshot = captureGridHistorySnapshot()
+  const afterSnapshot = afterSnapshotOverride ?? captureGridHistorySnapshot()
   if (
     serializeGridHistorySnapshot(normalizedBeforeSnapshot) ===
     serializeGridHistorySnapshot(afterSnapshot)
@@ -1735,9 +1855,11 @@ function publishDraft(columns: SheetGridColumn[], rows: GridRow[]) {
   emit('draftChange', payload, context)
 }
 
-function scheduleDraftChange() {
+function scheduleDraftChange(columns?: SheetGridColumn[], rows?: GridRow[]) {
   const context = getSheetDraftContext()
-  queuedGridPayload.value = buildDraftPayload(readGridColumns(), readGridRows())
+  const nextColumns = columns ?? readGridColumns()
+  const nextRows = rows ?? readGridRows()
+  queuedGridPayload.value = buildDraftPayload(nextColumns, nextRows)
   emit('dirtyChange', Boolean(queuedGridPayload.value), context)
   clearSyncTimer()
   syncTimer.value = window.setTimeout(() => {
@@ -1843,15 +1965,72 @@ function resolveRenderedCellState(
     resolvedRowId !== null
       ? formulaCellResults.value.get(buildSpreadsheetFormulaCellKey(resolvedRowId, columnKey))
       : null
+  const deferredFormulaResult =
+    resolvedRowId !== null
+      ? resolveDeferredFormulaResult(
+          resolvedRowId,
+          columnKey,
+          formulaResult,
+        )
+      : formulaResult
+  const shouldDeferFormulaError =
+    resolvedRowId !== null &&
+    shouldDeferInlineFormulaCellError(resolvedRowId, columnKey)
+
+  if (shouldDeferFormulaError) {
+    return {
+      value: rawValue ?? fallbackValue,
+      displayValue:
+        typeof rawValue === 'string'
+          ? rawValue
+          : fallbackDisplayValue ??
+            (fallbackValue === null || fallbackValue === undefined ? '' : String(fallbackValue)),
+      error: null,
+    }
+  }
 
   return {
-    value: formulaResult?.value ?? fallbackValue,
+    value: deferredFormulaResult?.value ?? fallbackValue,
     displayValue:
-      formulaResult?.displayValue ??
+      deferredFormulaResult?.displayValue ??
       fallbackDisplayValue ??
       (fallbackValue === null || fallbackValue === undefined ? '' : String(fallbackValue)),
-    error: formulaResult?.error ?? null,
+    error: deferredFormulaResult?.error ?? null,
   }
+}
+
+function shouldDeferInlineFormulaCellError(rowId: string, columnKey: string) {
+  if (!inlineFormulaCell.value) {
+    return false
+  }
+
+  if (
+    inlineFormulaCell.value.rowId !== rowId ||
+    inlineFormulaCell.value.columnKey !== columnKey
+  ) {
+    return false
+  }
+
+  return inlineFormulaAnalysis.value.isIncomplete || Boolean(inlineFormulaAnalysis.value.errorMessage)
+}
+
+function resolveDeferredFormulaResult(
+  rowId: string,
+  columnKey: string,
+  formulaResult: SpreadsheetFormulaCellResult | null,
+) {
+  if (!formulaResult?.error || !isGridCellEditorActive.value) {
+    return formulaResult
+  }
+
+  return (
+    lastStableFormulaCellResults.value.get(buildSpreadsheetFormulaCellKey(rowId, columnKey)) ?? {
+      expression: formulaResult.expression,
+      value: null,
+      displayValue: '',
+      error: null,
+    }
+  )
 }
 
 function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridRow> {
@@ -2357,6 +2536,8 @@ defineExpose<SheetStageHandle>({
           ref="gridRootRef"
           class="grid-stage__grid"
           @keydown.capture="handleGridKeydownCapture"
+          @focusin.capture="scheduleGridEditorStateSync"
+          @focusout.capture="scheduleGridEditorStateSync"
           @mousedown.capture="handleGridMouseDownCapture"
           @mousemove.capture="handleGridMouseMoveCapture"
           @mouseup.capture="handleGridMouseUpCapture"
