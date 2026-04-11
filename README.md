@@ -146,6 +146,8 @@ Before first start:
 2. Create `backend/.env.db.prod` from [backend/.env.db.prod.example](backend/.env.db.prod.example).
 3. Replace all placeholder secrets with real values.
 
+The production `backend` and `migrations` services load both env files: `backend/.env.prod` and `backend/.env.db.prod`.
+
 Start the production stack:
 
 ```sh

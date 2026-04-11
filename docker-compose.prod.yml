@@ -22,6 +22,7 @@ services:
     restart: "no"
     env_file:
       - ./backend/.env.prod
+      - ./backend/.env.db.prod
     command: ["alembic", "upgrade", "head"]
     depends_on:
       db:
@@ -36,6 +37,7 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend/.env.prod
+      - ./backend/.env.db.prod
     depends_on:
       db:
         condition: service_healthy
