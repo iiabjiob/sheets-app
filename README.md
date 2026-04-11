@@ -152,6 +152,8 @@ Start the production stack:
 docker compose -f docker-compose.prod.yml up --build -d
 ```
 
+The production compose stack runs a dedicated one-shot `migrations` service before starting the backend.
+
 Application URLs:
 
 - `http://localhost:8080` for the web app

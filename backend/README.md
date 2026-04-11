@@ -70,6 +70,10 @@ cd backend
 uv run alembic upgrade head
 ```
 
+In production compose, Alembic migrations are applied by a dedicated one-shot `migrations` service before the API container starts.
+
+In the production Docker image, Alembic migrations are applied automatically during container startup before the API process begins.
+
 If your current local database was created earlier through the temporary `create_all` bootstrap path, align it once with:
 
 ```bash

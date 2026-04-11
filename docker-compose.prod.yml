@@ -15,6 +15,20 @@ services:
     networks:
       - net
 
+  migrations:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    restart: "no"
+    env_file:
+      - ./backend/.env.prod
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - net
+
   backend:
     build:
       context: ./backend
@@ -25,6 +39,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     expose:
       - "8000"
     healthcheck:
