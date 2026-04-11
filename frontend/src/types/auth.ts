@@ -21,6 +21,11 @@ export interface AuthMessageResponse {
   message: string
 }
 
+export interface AuthPublicConfig {
+  demo_user_enabled: boolean
+  demo_user_email: string | null
+}
+
 export interface LoginInput {
   email: string
   password: string

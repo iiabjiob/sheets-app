@@ -43,3 +43,8 @@ class ResendVerificationRequest(BaseModel):
 
 class AuthMessageResponse(BaseModel):
     message: str
+
+
+class AuthPublicConfigResponse(BaseModel):
+    demo_user_enabled: bool
+    demo_user_email: str | None = None

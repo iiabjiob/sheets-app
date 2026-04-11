@@ -4,10 +4,12 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import get_settings
 from app.infrastructure.db.database import get_db
 from app.models import UserModel
 from app.schemas.auth import (
     AuthMessageResponse,
+    AuthPublicConfigResponse,
     AuthSessionResponse,
     AuthUserResponse,
     LoginRequest,
@@ -61,6 +63,15 @@ async def resend_verification(
 ) -> AuthMessageResponse:
     return AuthMessageResponse.model_validate(
         await auth_service.resend_verification(db, email=payload.email)
+    )
+
+
+@router.get("/public-config", response_model=AuthPublicConfigResponse)
+async def public_config() -> AuthPublicConfigResponse:
+    settings = get_settings()
+    return AuthPublicConfigResponse(
+        demo_user_enabled=settings.demo_user_enabled,
+        demo_user_email=settings.demo_user_email if settings.demo_user_enabled else None,
     )
 
 

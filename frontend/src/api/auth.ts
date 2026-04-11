@@ -2,6 +2,7 @@ import { apiRequest } from '@/api/http'
 import { clearStoredAccessToken, getStoredAccessToken, setStoredAccessToken } from '@/auth/tokenStorage'
 import type {
   AuthMessageResponse,
+  AuthPublicConfig,
   AuthSession,
   AuthUser,
   LoginInput,
@@ -46,4 +47,8 @@ export async function resendVerificationEmail(email: string): Promise<AuthMessag
     method: 'POST',
     body: JSON.stringify({ email }),
   })
+}
+
+export async function fetchAuthPublicConfig(): Promise<AuthPublicConfig> {
+  return apiRequest<AuthPublicConfig>('/auth/public-config')
 }

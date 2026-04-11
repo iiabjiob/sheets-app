@@ -1,22 +1,30 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { fetchAuthPublicConfig } from '@/api/auth'
 import UiButton from '@/components/ui/UiButton.vue'
 import { useAuthStore } from '@/stores/auth'
-
-const DEMO_EMAIL = 'demo@sheets.local'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 
+const demoUserEnabled = ref(false)
+const demoUserEmail = ref<string | null>(null)
 const verificationState = ref<'idle' | 'pending' | 'success' | 'error'>('idle')
-const email = ref(DEMO_EMAIL)
+const email = ref('')
 const password = ref('')
 const localError = ref<string | null>(null)
+const emailPlaceholder = computed(() => demoUserEmail.value ?? 'you@example.com')
+const heroDescription = computed(() =>
+  demoUserEnabled.value
+    ? 'Use the demo account or sign in with your own credentials.'
+    : 'Sign in to continue to your workspace.',
+)
 
 onMounted(() => {
+  void loadPublicConfig()
   void handleVerificationToken(route.query.token)
 })
 
@@ -63,6 +71,21 @@ async function handleVerificationToken(value: unknown) {
     localError.value = error instanceof Error ? error.message : 'Verification failed.'
   }
 }
+
+async function loadPublicConfig() {
+  try {
+    const config = await fetchAuthPublicConfig()
+    demoUserEnabled.value = config.demo_user_enabled
+    demoUserEmail.value = config.demo_user_email
+
+    if (config.demo_user_enabled && config.demo_user_email && !email.value.trim()) {
+      email.value = config.demo_user_email
+    }
+  } catch {
+    demoUserEnabled.value = false
+    demoUserEmail.value = null
+  }
+}
 </script>
 
 <template>
@@ -71,7 +94,7 @@ async function handleVerificationToken(value: unknown) {
       <div class="auth-panel__hero">
         <p class="auth-panel__eyebrow">Sheets app</p>
         <h1>Sign in</h1>
-        <p>Use the local demo account while the grid shell is still the main focus.</p>
+        <p>{{ heroDescription }}</p>
       </div>
 
       <div v-if="verificationState === 'pending'" class="auth-panel__status auth-panel__status--info">
@@ -82,12 +105,12 @@ async function handleVerificationToken(value: unknown) {
         {{ authStore.successMessage }}
       </div>
 
-      <div class="auth-panel__notice">
+      <div v-if="demoUserEnabled && demoUserEmail" class="auth-panel__notice">
         <p>
           <strong>Demo user:</strong>
-          {{ DEMO_EMAIL }}
+          {{ demoUserEmail }}
         </p>
-        <p>Password comes from <code>backend/.env.dev</code> via <code>DEMO_USER_PASSWORD</code>.</p>
+        <p>Use the configured demo credentials to sign in.</p>
       </div>
 
       <form class="auth-form" @submit.prevent="submit">
@@ -99,7 +122,7 @@ async function handleVerificationToken(value: unknown) {
             name="email"
             type="email"
             autocomplete="email"
-            placeholder="demo@sheets.local"
+            :placeholder="emailPlaceholder"
           />
         </label>
 
