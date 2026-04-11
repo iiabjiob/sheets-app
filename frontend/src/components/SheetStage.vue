@@ -11,6 +11,17 @@ import {
 
 import AppDialog from '@/components/AppDialog.vue'
 import FormulaHelpPanel from '@/components/formulas/FormulaHelpPanel.vue'
+import {
+  buildFormulaAutocompleteSuggestions,
+  buildFormulaFunctionTemplate,
+  buildFormulaSignatureHint,
+  resolveFormulaAutocompleteMatch,
+  resolveFormulaFunctionContext,
+  resolveNextFormulaArgumentSelection,
+  type FormulaAutocompleteSuggestion,
+  type FormulaCaretSelection,
+} from '@/formulas/formulaAutocomplete'
+import { formulaHelpCatalog } from '@/formulas/formulaHelpCatalog'
 import UiButton from '@/components/ui/UiButton.vue'
 import { workspaceDataGridTheme } from '@/theme/dataGridTheme'
 import type {
@@ -283,6 +294,9 @@ const inlineFormulaInitialValue = ref('')
 const inlineFormulaInputRef = ref<HTMLTextAreaElement | null>(null)
 const inlineFormulaHighlightRef = ref<HTMLElement | null>(null)
 const inlineFormulaPanelRef = ref<HTMLElement | null>(null)
+const inlineFormulaSelection = ref<FormulaCaretSelection>({ start: 1, end: 1 })
+const inlineFormulaAutocompleteActiveIndex = ref(0)
+const isInlineFormulaInputFocused = ref(false)
 const inlineFormulaSyncFrame = ref<number | null>(null)
 const gridEditorSyncFrame = ref<number | null>(null)
 const inlineFormulaHistoryBeforeSnapshot = ref<GridHistorySnapshot | null>(null)
@@ -433,6 +447,65 @@ const inlineFormulaHasDraftChanges = computed(() => {
 
   return inlineFormulaValue.value !== inlineFormulaInitialValue.value
 })
+const inlineFormulaAutocompleteMatch = computed(() =>
+  resolveFormulaAutocompleteMatch(inlineFormulaValue.value, inlineFormulaSelection.value),
+)
+const inlineFormulaAutocompleteSuggestions = computed<readonly FormulaAutocompleteSuggestion[]>(() =>
+  buildFormulaAutocompleteSuggestions(formulaHelpCatalog, inlineFormulaAutocompleteMatch.value),
+)
+const isInlineFormulaAutocompleteVisible = computed(
+  () =>
+    isInlineFormulaInputFocused.value &&
+    inlineFormulaAutocompleteSuggestions.value.length > 0,
+)
+const inlineFormulaFunctionContext = computed(() =>
+  resolveFormulaFunctionContext(inlineFormulaValue.value, inlineFormulaSelection.value),
+)
+const activeInlineFormulaSuggestion = computed(
+  () =>
+    inlineFormulaAutocompleteSuggestions.value[inlineFormulaAutocompleteActiveIndex.value] ?? null,
+)
+const highlightedInlineFormulaFunctionName = computed(() => {
+  if (isInlineFormulaAutocompleteVisible.value) {
+    return (
+      activeInlineFormulaSuggestion.value?.name ??
+      inlineFormulaFunctionContext.value?.name ??
+      null
+    )
+  }
+
+  return inlineFormulaFunctionContext.value?.name ?? null
+})
+const inlineFormulaSignatureHint = computed(() => {
+  const signature =
+    activeInlineFormulaSuggestion.value?.signature ??
+    formulaHelpCatalog.find((entry) => entry.name === highlightedInlineFormulaFunctionName.value)?.signature ??
+    null
+  if (!signature) {
+    return null
+  }
+
+  const activeArgumentIndex = inlineFormulaFunctionContext.value
+    ? (inlineFormulaFunctionContext.value.activeArgumentIndex ?? 0)
+    : (activeInlineFormulaSuggestion.value ? 0 : null)
+
+  return buildFormulaSignatureHint(signature, activeArgumentIndex)
+})
+const visibleInlineFormulaErrorMessage = computed(() => {
+  if (!inlineFormulaAnalysis.value.errorMessage) {
+    return ''
+  }
+
+  if (inlineFormulaAnalysis.value.isIncomplete) {
+    return ''
+  }
+
+  if (isInlineFormulaInputFocused.value && inlineFormulaHasDraftChanges.value) {
+    return ''
+  }
+
+  return inlineFormulaAnalysis.value.errorMessage
+})
 const inlineFormulaCanApply = computed(
   () =>
     Boolean(inlineFormulaCell.value) &&
@@ -477,6 +550,33 @@ watch(
     void nextTick(() => {
       refreshFormulaCells()
     })
+  },
+)
+
+watch(
+  () => {
+    const match = inlineFormulaAutocompleteMatch.value
+    return match
+      ? `${match.query}::${match.replacementStart}::${match.replacementEnd}`
+      : null
+  },
+  () => {
+    inlineFormulaAutocompleteActiveIndex.value = 0
+  },
+)
+
+watch(
+  () => inlineFormulaAutocompleteSuggestions.value,
+  (suggestions) => {
+    if (!suggestions.length) {
+      inlineFormulaAutocompleteActiveIndex.value = 0
+      return
+    }
+
+    inlineFormulaAutocompleteActiveIndex.value = Math.max(
+      0,
+      Math.min(inlineFormulaAutocompleteActiveIndex.value, suggestions.length - 1),
+    )
   },
 )
 
@@ -835,6 +935,10 @@ function openInlineFormulaComposer(
     columnLabel: resolveColumnLabel(activeCell.columnKey),
   }
   inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
   refreshInlineFormulaComposer(true)
 }
 
@@ -894,8 +998,9 @@ function syncInlineFormulaState() {
     return
   }
 
+  const nextState = coerceFormulaEditorState(rawFormulaValue)
   dismissedInlineFormulaCellKey.value = null
-  inlineFormulaInitialValue.value = coerceFormulaEditorState(rawFormulaValue).value
+  inlineFormulaInitialValue.value = nextState.value
   inlineFormulaHistoryBeforeSnapshot.value = captureGridHistorySnapshot()
   inlineFormulaCell.value = {
     rowId: activeCell.rowId,
@@ -903,7 +1008,11 @@ function syncInlineFormulaState() {
     columnKey: activeCell.columnKey,
     columnLabel: resolveColumnLabel(activeCell.columnKey),
   }
-  inlineFormulaValue.value = coerceFormulaEditorState(rawFormulaValue).value
+  inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
   refreshInlineFormulaComposer()
 }
 
@@ -911,6 +1020,8 @@ function clearInlineFormulaComposer() {
   inlineFormulaCell.value = null
   inlineFormulaValue.value = ''
   inlineFormulaInitialValue.value = ''
+  setInlineFormulaSelection({ start: 1, end: 1 })
+  isInlineFormulaInputFocused.value = false
   inlineFormulaHistoryBeforeSnapshot.value = null
   formulaReferencePointerState.value = null
   disconnectFormulaHighlightObserver()
@@ -974,8 +1085,7 @@ function focusInlineFormulaInput() {
   }
 
   input.focus()
-  const nextCaret = inlineFormulaValue.value.length
-  input.setSelectionRange(nextCaret, nextCaret)
+  input.setSelectionRange(inlineFormulaSelection.value.start, inlineFormulaSelection.value.end)
 }
 
 function clampFormulaEditorSelection(position: number, valueLength: number) {
@@ -1009,6 +1119,18 @@ function coerceFormulaEditorState(
   }
 }
 
+function setInlineFormulaSelection(range: { start: number; end: number }) {
+  if (
+    inlineFormulaSelection.value.start === range.start &&
+    inlineFormulaSelection.value.end === range.end
+  ) {
+    return false
+  }
+
+  inlineFormulaSelection.value = range
+  return true
+}
+
 function syncInlineFormulaCaretBoundary() {
   const input = inlineFormulaInputRef.value
   if (!input) {
@@ -1026,6 +1148,10 @@ function syncInlineFormulaCaretBoundary() {
   }
 
   input.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
   input.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
 }
 
@@ -1191,9 +1317,16 @@ function previewInlineFormulaReferenceDrag(
   pointerState.previewRowIndex = target.rowIndex
   pointerState.previewColumnKey = target.columnKey
   pointerState.previewColumnLabel = resolveColumnLabel(target.columnKey)
-  inlineFormulaValue.value = coerceFormulaEditorState(
+  const nextState = coerceFormulaEditorState(
     `${pointerState.expressionPrefix}${nextExpression}`,
-  ).value
+    inlineFormulaSelection.value.start,
+    inlineFormulaSelection.value.end,
+  )
+  inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
 }
 
 function insertFormulaReference(target: {
@@ -1218,6 +1351,10 @@ function insertFormulaReference(target: {
   )
 
   inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
 
   window.requestAnimationFrame(() => {
     const formulaInput = inlineFormulaInputRef.value ?? resolveActiveEditorInput()
@@ -1243,12 +1380,94 @@ function handleInlineFormulaInput(event: Event) {
   inlineFormulaValue.value = nextState.value
   target.value = nextState.value
   target.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
   syncInlineFormulaScroll()
 }
 
 function handleInlineFormulaFocus() {
+  isInlineFormulaInputFocused.value = true
   syncInlineFormulaCaretBoundary()
   syncInlineFormulaScroll()
+}
+
+function handleInlineFormulaBlur() {
+  isInlineFormulaInputFocused.value = false
+}
+
+function selectInlineFormulaRange(
+  range: { start: number; end: number },
+  options?: { focus?: boolean },
+) {
+  setInlineFormulaSelection(range)
+  const input = inlineFormulaInputRef.value
+  if (!input) {
+    return
+  }
+
+  if (options?.focus !== false) {
+    input.focus({ preventScroll: true })
+  }
+
+  input.setSelectionRange(range.start, range.end)
+}
+
+function applyInlineFormulaAutocomplete(
+  suggestion:
+    | FormulaAutocompleteSuggestion
+    | null
+    | undefined = inlineFormulaAutocompleteSuggestions.value[
+    inlineFormulaAutocompleteActiveIndex.value
+  ],
+) {
+  const match = inlineFormulaAutocompleteMatch.value
+  if (!match || !suggestion) {
+    return
+  }
+
+  const currentValue = inlineFormulaValue.value
+  const suffix = currentValue.slice(match.replacementEnd)
+  const template = buildFormulaFunctionTemplate(suggestion)
+  const hasOpeningParenthesis = suffix.startsWith('(')
+  const insertion = hasOpeningParenthesis ? suggestion.name : template.text
+  const nextValue = `${currentValue.slice(0, match.replacementStart)}${insertion}${currentValue.slice(match.replacementEnd)}`
+
+  let nextRange: { start: number; end: number }
+  if (hasOpeningParenthesis) {
+    const caret = match.replacementStart + suggestion.name.length + 1
+    nextRange = { start: caret, end: caret }
+  } else {
+    const firstArgument = template.argumentRanges[0] ?? null
+    if (firstArgument) {
+      nextRange = {
+        start: match.replacementStart + firstArgument.start,
+        end: match.replacementStart + firstArgument.end,
+      }
+    } else {
+      const caret = match.replacementStart + insertion.length - 1
+      nextRange = { start: caret, end: caret }
+    }
+  }
+
+  const nextState = coerceFormulaEditorState(nextValue, nextRange.start, nextRange.end)
+  inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
+
+  void nextTick(() => {
+    selectInlineFormulaRange(
+      {
+        start: nextState.selectionStart,
+        end: nextState.selectionEnd,
+      },
+      { focus: true },
+    )
+    syncInlineFormulaScroll()
+  })
 }
 
 function handleInlineFormulaPaneKeydown(event: KeyboardEvent) {
@@ -1263,6 +1482,41 @@ function handleInlineFormulaPaneKeydown(event: KeyboardEvent) {
 
 function handleInlineFormulaKeydown(event: KeyboardEvent) {
   const target = event.target instanceof HTMLTextAreaElement ? event.target : null
+
+  if (
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    inlineFormulaAutocompleteSuggestions.value.length > 0
+  ) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      inlineFormulaAutocompleteActiveIndex.value =
+        (inlineFormulaAutocompleteActiveIndex.value + 1) %
+        inlineFormulaAutocompleteSuggestions.value.length
+      return
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      inlineFormulaAutocompleteActiveIndex.value =
+        inlineFormulaAutocompleteActiveIndex.value === 0
+          ? inlineFormulaAutocompleteSuggestions.value.length - 1
+          : inlineFormulaAutocompleteActiveIndex.value - 1
+      return
+    }
+
+    if ((event.key === 'Enter' && !event.shiftKey) || (event.key === 'Tab' && !event.shiftKey)) {
+      const suggestion =
+        inlineFormulaAutocompleteSuggestions.value[inlineFormulaAutocompleteActiveIndex.value] ??
+        inlineFormulaAutocompleteSuggestions.value[0]
+      if (suggestion) {
+        event.preventDefault()
+        applyInlineFormulaAutocomplete(suggestion)
+        return
+      }
+    }
+  }
 
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
@@ -1281,12 +1535,27 @@ function handleInlineFormulaKeydown(event: KeyboardEvent) {
   if ((event.key === 'ArrowLeft' || event.key === 'Backspace') && caretTouchesPrefix) {
     event.preventDefault()
     target.setSelectionRange(1, 1)
+    setInlineFormulaSelection({ start: 1, end: 1 })
     return
   }
 
   if (event.key === 'Home') {
     event.preventDefault()
     target.setSelectionRange(1, 1)
+    setInlineFormulaSelection({ start: 1, end: 1 })
+    return
+  }
+
+  if (event.key === 'Tab') {
+    const nextArgument = resolveNextFormulaArgumentSelection(
+      inlineFormulaValue.value,
+      inlineFormulaSelection.value,
+      event.shiftKey ? -1 : 1,
+    )
+    if (nextArgument) {
+      event.preventDefault()
+      selectInlineFormulaRange(nextArgument)
+    }
   }
 }
 
@@ -1332,7 +1601,12 @@ function handleInlineFormulaScroll() {
 }
 
 function handleUseFormulaHelpExample(example: string) {
-  inlineFormulaValue.value = coerceFormulaEditorState(example).value
+  const nextState = coerceFormulaEditorState(example)
+  inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
   refreshInlineFormulaComposer(true)
 }
 
@@ -1963,7 +2237,7 @@ function resolveRenderedCellState(
   const rawValue = row?.[columnKey]
   const formulaResult =
     resolvedRowId !== null
-      ? formulaCellResults.value.get(buildSpreadsheetFormulaCellKey(resolvedRowId, columnKey))
+      ? formulaCellResults.value.get(buildSpreadsheetFormulaCellKey(resolvedRowId, columnKey)) ?? null
       : null
   const deferredFormulaResult =
     resolvedRowId !== null
@@ -2604,7 +2878,7 @@ defineExpose<SheetStageHandle>({
 
           <div
             class="formula-pane__editor"
-            :class="{ 'formula-pane__editor--error': Boolean(inlineFormulaAnalysis.errorMessage) }"
+            :class="{ 'formula-pane__editor--error': Boolean(visibleInlineFormulaErrorMessage) }"
           >
             <div class="formula-pane__label-row">
               <span class="formula-pane__label">Formula syntax</span>
@@ -2639,6 +2913,7 @@ defineExpose<SheetStageHandle>({
                 autocomplete="off"
                 autocorrect="off"
                 @focus="handleInlineFormulaFocus"
+                @blur="handleInlineFormulaBlur"
                 @click="syncInlineFormulaCaretBoundary"
                 @input="handleInlineFormulaInput"
                 @keydown="handleInlineFormulaKeydown"
@@ -2647,6 +2922,48 @@ defineExpose<SheetStageHandle>({
                 @scroll="handleInlineFormulaScroll"
               />
             </div>
+          </div>
+
+          <div
+            v-if="isInlineFormulaAutocompleteVisible"
+            class="formula-pane__autocomplete"
+            role="listbox"
+            aria-label="Formula function suggestions"
+          >
+            <div class="formula-pane__autocomplete-label">
+              <span>Function suggestions</span>
+              <small>Enter or Tab inserts the function</small>
+            </div>
+
+            <button
+              v-for="(suggestion, index) in inlineFormulaAutocompleteSuggestions"
+              :key="suggestion.name"
+              type="button"
+              class="formula-pane__autocomplete-item"
+              :class="{ 'formula-pane__autocomplete-item--active': index === inlineFormulaAutocompleteActiveIndex }"
+              :aria-selected="index === inlineFormulaAutocompleteActiveIndex"
+              @mouseenter="inlineFormulaAutocompleteActiveIndex = index"
+              @mousedown.prevent
+              @click="applyInlineFormulaAutocomplete(suggestion)"
+            >
+              <div class="formula-pane__autocomplete-item-head">
+                <strong>{{ suggestion.name }}</strong>
+                <span>{{ suggestion.signature }}</span>
+              </div>
+              <p>{{ suggestion.summary }}</p>
+            </button>
+          </div>
+
+          <div v-if="inlineFormulaSignatureHint" class="formula-pane__signature-hint" aria-live="polite">
+            <span
+              v-for="segment in inlineFormulaSignatureHint.segments"
+              :key="segment.id"
+              class="formula-pane__signature-segment"
+              :class="[
+                `formula-pane__signature-segment--${segment.kind}`,
+                segment.active ? 'formula-pane__signature-segment--active' : '',
+              ]"
+            >{{ segment.text }}</span>
           </div>
 
           <div class="formula-pane__references">
@@ -2674,11 +2991,14 @@ defineExpose<SheetStageHandle>({
             </p>
           </div>
 
-          <p v-if="inlineFormulaAnalysis.errorMessage" class="formula-pane__error">
-            {{ inlineFormulaAnalysis.errorMessage }}
+          <p v-if="visibleInlineFormulaErrorMessage" class="formula-pane__error">
+            {{ visibleInlineFormulaErrorMessage }}
           </p>
 
-          <FormulaHelpPanel @use-example="handleUseFormulaHelpExample" />
+          <FormulaHelpPanel
+            :active-function-name="highlightedInlineFormulaFunctionName"
+            @use-example="handleUseFormulaHelpExample"
+          />
         </div>
 
         <footer class="formula-pane__footer">

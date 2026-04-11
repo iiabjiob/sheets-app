@@ -13,9 +13,23 @@ const emit = defineEmits<{
   useExample: [example: string]
 }>()
 
+const props = withDefaults(
+  defineProps<{
+    activeFunctionName?: string | null
+  }>(),
+  {
+    activeFunctionName: null,
+  },
+)
+
 const searchQuery = ref('')
 
 const normalizedSearchQuery = computed(() => searchQuery.value.trim().toLowerCase())
+const normalizedActiveFunctionName = computed(() => props.activeFunctionName?.trim().toUpperCase() ?? '')
+const activeEntry = computed(
+  () =>
+    formulaHelpCatalog.find((entry) => entry.name === normalizedActiveFunctionName.value) ?? null,
+)
 
 const filteredEntries = computed(() => {
   if (!normalizedSearchQuery.value) {
@@ -107,12 +121,41 @@ function matchesEntry(entry: FormulaHelpEntry, query: string) {
       </div>
     </div>
 
+    <div v-if="activeEntry" class="formula-help__active">
+      <div class="formula-help__section-head">
+        <span>Focused function</span>
+        <small>{{ activeEntry.category }}</small>
+      </div>
+
+      <article class="formula-help__entry formula-help__entry--active">
+        <div class="formula-help__entry-topline">
+          <div class="formula-help__entry-title">
+            <strong>{{ activeEntry.name }}</strong>
+            <span
+              v-if="activeEntry.availability === 'workbook'"
+              class="formula-help__badge formula-help__badge--workbook"
+            >
+              Workbook
+            </span>
+          </div>
+
+          <UiButton variant="ghost" size="sm" @click="emit('useExample', activeEntry.example)">
+            Use example
+          </UiButton>
+        </div>
+
+        <p class="formula-help__summary">{{ activeEntry.summary }}</p>
+        <code class="formula-help__signature">{{ activeEntry.signature }}</code>
+        <code class="formula-help__example">{{ activeEntry.example }}</code>
+      </article>
+    </div>
+
     <div class="formula-help__groups">
       <details
         v-for="group in groupedEntries"
         :key="group.category"
         class="formula-help__group"
-        :open="Boolean(normalizedSearchQuery) || group.category === 'Numeric'"
+        :open="Boolean(normalizedSearchQuery) || group.category === 'Numeric' || activeEntry?.category === group.category"
       >
         <summary class="formula-help__group-summary">
           <span>{{ group.category }}</span>
@@ -124,6 +167,7 @@ function matchesEntry(entry: FormulaHelpEntry, query: string) {
             v-for="entry in group.entries"
             :key="entry.name"
             class="formula-help__entry"
+            :class="{ 'formula-help__entry--active': entry.name === normalizedActiveFunctionName }"
           >
             <div class="formula-help__entry-topline">
               <div class="formula-help__entry-title">
