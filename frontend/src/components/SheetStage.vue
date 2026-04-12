@@ -244,6 +244,15 @@ interface InlineFormulaSelectionReferenceState {
   replaceEnd: number
 }
 
+interface InlineFormulaReferenceInsertAnchorState {
+  rowId: string
+  rowIndex: number
+  columnKey: string
+  expressionPrefix: string
+  replaceStart: number
+  replaceEnd: number
+}
+
 interface FormulaEditorState {
   value: string
   selectionStart: number
@@ -360,10 +369,13 @@ const inlineFormulaAutocompleteActiveIndex = ref(0)
 const isInlineFormulaInputFocused = ref(false)
 const inlineFormulaSyncFrame = ref<number | null>(null)
 const gridEditorSyncFrame = ref<number | null>(null)
+const inlineFormulaGridRefocusFrame = ref<number | null>(null)
 const inlineFormulaHistoryBeforeSnapshot = ref<GridHistorySnapshot | null>(null)
 const dismissedInlineFormulaCellKey = ref<string | null>(null)
 const formulaReferencePointerState = ref<FormulaReferencePointerState | null>(null)
 const inlineFormulaSelectionReferenceState = ref<InlineFormulaSelectionReferenceState | null>(null)
+const inlineFormulaReferenceInsertAnchorState = ref<InlineFormulaReferenceInsertAnchorState | null>(null)
+const isInlineFormulaGridInteracting = ref(false)
 const isGridCellEditorActive = ref(false)
 const lastStableFormulaCellResults = ref<Map<string, SpreadsheetFormulaCellResult>>(new Map())
 const pendingGridFocusRestoreTarget = ref<GridFocusRestoreTarget | null>(null)
@@ -762,6 +774,7 @@ function resetGridSessionState() {
   dismissedInlineFormulaCellKey.value = null
   clearPendingGridFocusRestore()
   clearInlineFormulaComposer()
+  clearInlineFormulaGridRefocus()
   clearSyncTimer()
   clearInlineFormulaSync()
   clearGridEditorStateSync()
@@ -772,6 +785,7 @@ function resetGridSessionState() {
 function teardownGridRuntime() {
   clearSyncTimer()
   clearInlineFormulaSync()
+  clearInlineFormulaGridRefocus()
   clearGridEditorStateSync()
   clearPendingGridFocusRestoreFrame()
   disconnectFormulaHighlightObserver()
@@ -877,8 +891,16 @@ function handleGridCellChange() {
 
 function handleGridSelectionChange(payload: { snapshot: GridSelectionSnapshotLike | null }) {
   gridSelectionSnapshot.value = payload.snapshot
-  if (inlineFormulaSelectionReferenceState.value && payload.snapshot) {
+  if (
+    inlineFormulaSelectionReferenceState.value &&
+    payload.snapshot &&
+    formulaReferencePointerState.value?.kind !== 'insert' &&
+    !isInlineFormulaGridInteracting.value
+  ) {
     applyInlineFormulaSelectionReference(payload.snapshot)
+    if (!isInlineFormulaGridInteracting.value) {
+      scheduleInlineFormulaGridRefocus()
+    }
   }
   scheduleGridEditorStateSync()
   scheduleInlineFormulaSync()
@@ -926,13 +948,53 @@ function handleGridMouseDownCapture(event: MouseEvent) {
     return
   }
 
-  const draggableOccurrence = resolveDraggableInlineFormulaReference(cellTarget.rowId, cellTarget.columnKey)
-  if (!draggableOccurrence) {
-    formulaReferencePointerState.value = null
-    beginInlineFormulaSelectionReference()
+  isInlineFormulaGridInteracting.value = true
+
+  if (event.shiftKey && inlineFormulaReferenceInsertAnchorState.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    applyInlineFormulaShiftSelectionReference(
+      inlineFormulaReferenceInsertAnchorState.value,
+      cellTarget,
+    )
+    void nextTick(() => {
+      scheduleInlineFormulaGridRefocus()
+    })
     return
   }
 
+  const draggableOccurrence = resolveDraggableInlineFormulaReference(cellTarget.rowId, cellTarget.columnKey)
+  if (!draggableOccurrence) {
+    const selectionReferenceState = beginInlineFormulaSelectionReference()
+    if (!selectionReferenceState) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    formulaReferencePointerState.value = {
+      kind: 'insert',
+      ...cellTarget,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      didDrag: false,
+      allowsInsert: true,
+      toneIndex: null,
+      previewRowId: cellTarget.rowId,
+      previewRowIndex: cellTarget.rowIndex,
+      previewColumnKey: cellTarget.columnKey,
+      previewColumnLabel: resolveColumnLabel(cellTarget.columnKey),
+      baseValue: inlineFormulaValue.value,
+      baseExpression: selectionReferenceState.baseExpression,
+      expressionPrefix: selectionReferenceState.expressionPrefix,
+      replaceStart: selectionReferenceState.replaceStart,
+      replaceEnd: selectionReferenceState.replaceEnd,
+    }
+    previewInlineFormulaReferenceInsert(formulaReferencePointerState.value, cellTarget)
+    return
+  }
+
+  clearInlineFormulaReferenceInsertAnchor()
   const expressionPrefix = resolveInlineFormulaPrefix(inlineFormulaValue.value)
   const baseExpression = normalizeSpreadsheetFormulaExpression(inlineFormulaValue.value) ?? ''
 
@@ -977,23 +1039,40 @@ function handleGridMouseMoveCapture(event: MouseEvent) {
     }
   }
 
+  if (pointerState.kind === 'insert') {
+    const cellTarget = resolveGridCellTarget(event)
+    if (cellTarget) {
+      previewInlineFormulaReferenceInsert(pointerState, cellTarget)
+    }
+  }
+
   event.preventDefault()
   event.stopPropagation()
 }
 
 function handleGridMouseUpCapture(event: MouseEvent) {
   const pointerState = formulaReferencePointerState.value
-  if (!pointerState || !inlineFormulaCell.value || event.button !== 0) {
+  if (!inlineFormulaCell.value || event.button !== 0) {
     return
   }
 
   formulaReferencePointerState.value = null
-  event.preventDefault()
-  event.stopPropagation()
+  if (pointerState) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
 
-  if (pointerState.kind === 'drag-reference' && pointerState.didDrag) {
+  const shouldRefocusFormulaInput = Boolean(
+    (pointerState?.kind === 'drag-reference' && pointerState.didDrag) ||
+      pointerState?.kind === 'insert' ||
+      inlineFormulaSelectionReferenceState.value ||
+      isInlineFormulaGridInteracting.value,
+  )
+  isInlineFormulaGridInteracting.value = false
+
+  if (shouldRefocusFormulaInput) {
     void nextTick(() => {
-      focusInlineFormulaInput()
+      scheduleInlineFormulaGridRefocus()
     })
   }
 }
@@ -1019,6 +1098,17 @@ function handleGridClickCapture(event: MouseEvent) {
     formulaReferencePointerState.value = null
     event.preventDefault()
     event.stopPropagation()
+    return
+  }
+
+  if (
+    (event.shiftKey && inlineFormulaReferenceInsertAnchorState.value) ||
+    inlineFormulaSelectionReferenceState.value ||
+    isInlineFormulaGridInteracting.value
+  ) {
+    event.preventDefault()
+    event.stopPropagation()
+    scheduleInlineFormulaGridRefocus()
   }
 }
 
@@ -1176,9 +1266,12 @@ function clearInlineFormulaComposer() {
   inlineFormulaInitialValue.value = ''
   setInlineFormulaSelection({ start: 1, end: 1 })
   isInlineFormulaInputFocused.value = false
+  isInlineFormulaGridInteracting.value = false
   inlineFormulaHistoryBeforeSnapshot.value = null
   formulaReferencePointerState.value = null
   clearInlineFormulaSelectionReference()
+  clearInlineFormulaReferenceInsertAnchor()
+  clearInlineFormulaGridRefocus()
   disconnectFormulaHighlightObserver()
   void nextTick(() => {
     applyFormulaReferenceHighlights()
@@ -1241,6 +1334,25 @@ function focusInlineFormulaInput() {
 
   input.focus()
   input.setSelectionRange(inlineFormulaSelection.value.start, inlineFormulaSelection.value.end)
+}
+
+function clearInlineFormulaGridRefocus() {
+  if (inlineFormulaGridRefocusFrame.value !== null) {
+    window.cancelAnimationFrame(inlineFormulaGridRefocusFrame.value)
+    inlineFormulaGridRefocusFrame.value = null
+  }
+}
+
+function scheduleInlineFormulaGridRefocus() {
+  if (!inlineFormulaCell.value) {
+    return
+  }
+
+  clearInlineFormulaGridRefocus()
+  inlineFormulaGridRefocusFrame.value = window.requestAnimationFrame(() => {
+    inlineFormulaGridRefocusFrame.value = null
+    focusInlineFormulaInput()
+  })
 }
 
 function clampFormulaEditorSelection(position: number, valueLength: number) {
@@ -1512,6 +1624,10 @@ function clearInlineFormulaSelectionReference() {
   inlineFormulaSelectionReferenceState.value = null
 }
 
+function clearInlineFormulaReferenceInsertAnchor() {
+  inlineFormulaReferenceInsertAnchorState.value = null
+}
+
 function resolveInlineFormulaExpressionSelection(selection = inlineFormulaSelection.value) {
   const expressionPrefix = resolveInlineFormulaPrefix(inlineFormulaValue.value)
   const baseExpression = normalizeSpreadsheetFormulaExpression(inlineFormulaValue.value) ?? ''
@@ -1657,6 +1773,141 @@ function applyInlineFormulaSelectionReference(snapshot: GridSelectionSnapshotLik
   })
 }
 
+function applyInlineFormulaReference(reference: string, pointerState: FormulaReferencePointerState) {
+  const replaceStart = pointerState.replaceStart ?? 0
+  const replaceEnd = pointerState.replaceEnd ?? pointerState.baseExpression.length
+  const nextExpression = `${pointerState.baseExpression.slice(0, replaceStart)}${reference}${pointerState.baseExpression.slice(replaceEnd)}`
+  const nextCaret =
+    pointerState.expressionPrefix.length +
+    replaceStart +
+    reference.length
+  const nextState = coerceFormulaEditorState(
+    `${pointerState.expressionPrefix}${nextExpression}`,
+    nextCaret,
+    nextCaret,
+  )
+
+  inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
+
+  if (pointerState.kind === 'insert') {
+    inlineFormulaReferenceInsertAnchorState.value = {
+      rowId: pointerState.rowId,
+      rowIndex: pointerState.rowIndex,
+      columnKey: pointerState.columnKey,
+      expressionPrefix: pointerState.expressionPrefix,
+      replaceStart,
+      replaceEnd: replaceStart + reference.length,
+    }
+  }
+}
+
+function applyInlineFormulaShiftSelectionReference(
+  anchorState: InlineFormulaReferenceInsertAnchorState,
+  target: {
+    rowId: string
+    rowIndex: number
+    columnKey: string
+  },
+) {
+  const activeFormulaCell = inlineFormulaCell.value
+  if (!activeFormulaCell) {
+    return
+  }
+
+  const startColumnIndex = resolveVisibleColumnIndex(anchorState.columnKey)
+  const endColumnIndex = resolveVisibleColumnIndex(target.columnKey)
+  if (startColumnIndex < 0 || endColumnIndex < 0) {
+    return
+  }
+
+  const currentExpression = normalizeSpreadsheetFormulaExpression(inlineFormulaValue.value) ?? ''
+  const replaceStart = Math.max(0, Math.min(currentExpression.length, anchorState.replaceStart))
+  const replaceEnd = Math.max(replaceStart, Math.min(currentExpression.length, anchorState.replaceEnd))
+  const startResolvedColumnKey = resolveVisibleColumnKey(Math.min(startColumnIndex, endColumnIndex))
+  const endResolvedColumnKey = resolveVisibleColumnKey(Math.max(startColumnIndex, endColumnIndex))
+  if (!startResolvedColumnKey || !endResolvedColumnKey) {
+    return
+  }
+
+  const startRowIndex = Math.min(anchorState.rowIndex, target.rowIndex)
+  const endRowIndex = Math.max(anchorState.rowIndex, target.rowIndex)
+  const reference =
+    startRowIndex === endRowIndex && startResolvedColumnKey === endResolvedColumnKey
+      ? buildFormulaReference(startResolvedColumnKey, startRowIndex, activeFormulaCell.rowIndex)
+      : buildFormulaRangeReference(
+          startResolvedColumnKey,
+          endResolvedColumnKey,
+          startRowIndex,
+          endRowIndex,
+        )
+  const nextExpression = `${currentExpression.slice(0, replaceStart)}${reference}${currentExpression.slice(replaceEnd)}`
+  const nextCaret = anchorState.expressionPrefix.length + replaceStart + reference.length
+  const nextState = coerceFormulaEditorState(
+    `${anchorState.expressionPrefix}${nextExpression}`,
+    nextCaret,
+    nextCaret,
+  )
+
+  inlineFormulaValue.value = nextState.value
+  setInlineFormulaSelection({
+    start: nextState.selectionStart,
+    end: nextState.selectionEnd,
+  })
+  inlineFormulaReferenceInsertAnchorState.value = {
+    ...anchorState,
+    replaceStart,
+    replaceEnd: replaceStart + reference.length,
+  }
+}
+
+function previewInlineFormulaReferenceInsert(
+  pointerState: FormulaReferencePointerState,
+  target: {
+    rowId: string
+    rowIndex: number
+    columnKey: string
+  },
+) {
+  const activeFormulaCell = inlineFormulaCell.value
+  if (!activeFormulaCell || pointerState.replaceStart === null || pointerState.replaceEnd === null) {
+    return
+  }
+
+  const startColumnIndex = resolveVisibleColumnIndex(pointerState.columnKey)
+  const endColumnIndex = resolveVisibleColumnIndex(target.columnKey)
+  if (startColumnIndex < 0 || endColumnIndex < 0) {
+    return
+  }
+
+  const startRowIndex = Math.min(pointerState.rowIndex, target.rowIndex)
+  const endRowIndex = Math.max(pointerState.rowIndex, target.rowIndex)
+  const startResolvedColumnKey = resolveVisibleColumnKey(Math.min(startColumnIndex, endColumnIndex))
+  const endResolvedColumnKey = resolveVisibleColumnKey(Math.max(startColumnIndex, endColumnIndex))
+  if (!startResolvedColumnKey || !endResolvedColumnKey) {
+    return
+  }
+
+  const reference =
+    startRowIndex === endRowIndex && startResolvedColumnKey === endResolvedColumnKey
+      ? buildFormulaReference(startResolvedColumnKey, startRowIndex, activeFormulaCell.rowIndex)
+      : buildFormulaRangeReference(
+          startResolvedColumnKey,
+          endResolvedColumnKey,
+          startRowIndex,
+          endRowIndex,
+        )
+
+  pointerState.previewRowId = target.rowId
+  pointerState.previewRowIndex = target.rowIndex
+  pointerState.previewColumnKey = target.columnKey
+  pointerState.previewColumnLabel = resolveColumnLabel(target.columnKey)
+  applyInlineFormulaReference(reference, pointerState)
+}
+
 function getGridRuntime() {
   return dataGridRef.value?.getRuntime() ?? null
 }
@@ -1703,6 +1954,16 @@ function resolveVisibleColumnKey(columnIndex: number | null) {
 
   const snapshot = gridApi.value?.columns.getSnapshot() as GridColumnsSnapshotLike | undefined
   return snapshot?.visibleColumns?.[columnIndex]?.key ?? readGridColumns()[columnIndex]?.key ?? null
+}
+
+function resolveVisibleColumnIndex(columnKey: string) {
+  const snapshot = gridApi.value?.columns.getSnapshot() as GridColumnsSnapshotLike | undefined
+  const visibleColumnIndex = snapshot?.visibleColumns?.findIndex((column) => column.key === columnKey) ?? -1
+  if (visibleColumnIndex >= 0) {
+    return visibleColumnIndex
+  }
+
+  return readGridColumns().findIndex((column) => column.key === columnKey)
 }
 
 function resolveActiveEditorInput() {
@@ -1828,6 +2089,7 @@ function handleInlineFormulaInput(event: Event) {
   )
 
   clearInlineFormulaSelectionReference()
+  clearInlineFormulaReferenceInsertAnchor()
   inlineFormulaValue.value = nextState.value
   target.value = nextState.value
   target.setSelectionRange(nextState.selectionStart, nextState.selectionEnd)
@@ -1843,6 +2105,7 @@ function selectInlineFormulaRange(
   options?: { focus?: boolean },
 ) {
   clearInlineFormulaSelectionReference()
+  clearInlineFormulaReferenceInsertAnchor()
   setInlineFormulaSelection(range)
   const input = inlineFormulaInputRef.value
   if (!input) {
@@ -1870,6 +2133,7 @@ function applyInlineFormulaAutocomplete(
   }
 
   clearInlineFormulaSelectionReference()
+  clearInlineFormulaReferenceInsertAnchor()
   const currentValue = inlineFormulaValue.value
   const suffix = currentValue.slice(match.replacementEnd)
   const template = buildFormulaFunctionTemplate(suggestion)
@@ -2053,6 +2317,7 @@ function handleInlineFormulaScroll() {
 function handleUseFormulaHelpExample(example: string) {
   const nextState = coerceFormulaEditorState(example)
   clearInlineFormulaSelectionReference()
+  clearInlineFormulaReferenceInsertAnchor()
   inlineFormulaValue.value = nextState.value
   setInlineFormulaSelection({
     start: nextState.selectionStart,
