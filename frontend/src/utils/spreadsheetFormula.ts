@@ -152,6 +152,64 @@ export function isSpreadsheetFormulaValue(value: unknown) {
   return typeof value === 'string' && /^\s*=/.test(value)
 }
 
+export function rebaseSpreadsheetFormulaRowsAfterReorder(
+  previousRows: GridRow[],
+  nextRows: GridRow[],
+) {
+  if (previousRows.length === 0 || previousRows.length !== nextRows.length) {
+    return nextRows
+  }
+
+  const previousRowIds = previousRows.map((row, rowIndex) => resolveRowId(row, rowIndex))
+  const nextRowIds = nextRows.map((row, rowIndex) => resolveRowId(row, rowIndex))
+  if (previousRowIds.length !== nextRowIds.length) {
+    return nextRows
+  }
+
+  const didOrderChange = previousRowIds.some((rowId, index) => rowId !== nextRowIds[index])
+  if (!didOrderChange) {
+    return nextRows
+  }
+
+  const previousRowIdSet = new Set(previousRowIds)
+  if (previousRowIdSet.size !== nextRowIds.length || nextRowIds.some((rowId) => !previousRowIdSet.has(rowId))) {
+    return nextRows
+  }
+
+  const nextRowIndexById = new Map(nextRowIds.map((rowId, index) => [rowId, index]))
+  let didRewriteAnyFormula = false
+  const rewrittenRows = nextRows.map((row) => {
+    let nextRow: GridRow | null = null
+
+    for (const [columnKey, cellValue] of Object.entries(row)) {
+      if (!isSpreadsheetFormulaValue(cellValue)) {
+        continue
+      }
+
+      const rewrittenValue = rebaseSpreadsheetFormulaInputForRowReorder(
+        String(cellValue),
+        previousRows,
+        previousRowIds,
+        nextRowIndexById,
+      )
+      if (rewrittenValue === cellValue) {
+        continue
+      }
+
+      if (!nextRow) {
+        nextRow = { ...row }
+      }
+
+      nextRow[columnKey] = rewrittenValue
+      didRewriteAnyFormula = true
+    }
+
+    return nextRow ?? row
+  })
+
+  return didRewriteAnyFormula ? rewrittenRows : nextRows
+}
+
 function createSpreadsheetFormulaComputationState(
   columns: GridColumn[],
   rows: GridRow[],
@@ -550,6 +608,7 @@ function resolveTokenValue(
     return resolveReferenceValue(
       parsedReference.sheetReference,
       parsedReference.referenceName,
+      parsedReference.rangeReferenceName,
       parsedReference.rowSelector,
       currentRowIndex,
       currentSheet,
@@ -569,6 +628,7 @@ function resolveTokenValue(
   return resolveReferenceValue(
     parsedReference.sheetReference,
     parsedReference.referenceName,
+    parsedReference.rangeReferenceName,
     parsedReference.rowSelector,
     currentRowIndex,
     currentSheet,
@@ -579,6 +639,7 @@ function resolveTokenValue(
 function resolveReferenceValue(
   sheetReference: string | null,
   referenceName: string,
+  rangeReferenceName: string | null,
   rowSelector: DataGridFormulaRowSelector,
   currentRowIndex: number,
   currentSheet: SpreadsheetFormulaResolvedSheet,
@@ -598,15 +659,16 @@ function resolveReferenceValue(
     )
   }
 
-  const columnKey = resolveReferenceColumnKey(
+  const columnKeys = resolveReferenceColumnKeys(
     referenceName,
+    rangeReferenceName,
     targetSheet.columns,
     targetSheet.columnLookup,
   )
-  if (!columnKey) {
+  if (!columnKeys.length) {
     return createFormulaErrorValue(
       'REF',
-      `Column "${referenceName}" does not exist on sheet "${targetSheet.name}".`,
+      buildMissingReferenceMessage(referenceName, rangeReferenceName, targetSheet.name),
     )
   }
 
@@ -618,8 +680,8 @@ function resolveReferenceValue(
     )
   }
 
-  const values = rowIndices.map((rowIndex) =>
-    resolveResolvedCellValue(targetSheet, rowIndex, columnKey, state),
+  const values = rowIndices.flatMap((rowIndex) =>
+    columnKeys.map((columnKey) => resolveResolvedCellValue(targetSheet, rowIndex, columnKey, state)),
   )
 
   return values.length === 1 ? values[0] : values
@@ -692,6 +754,7 @@ function resolveReferenceTargets(
     rawIdentifier: string,
     sheetReference: string | null,
     referenceName: string,
+    rangeReferenceName: string | null,
     rowSelector: DataGridFormulaRowSelector,
     dependencyIndex: number,
     spanStart: number,
@@ -706,17 +769,16 @@ function resolveReferenceTargets(
       return
     }
 
-    const columnKey = resolveReferenceColumnKey(
+    const columnKeys = resolveReferenceColumnKeys(
       referenceName,
+      rangeReferenceName,
       targetSheet.columns,
       targetSheet.columnLookup,
     )
-    if (!columnKey) {
+    if (!columnKeys.length) {
       return
     }
 
-    const columnLabel =
-      targetSheet.columns.find((column) => column.key === columnKey)?.label ?? columnKey
     const rowIndices = resolveRowIndices(rowSelector, currentRowIndex, targetSheet.rows.length)
     const occurrenceTargets: SpreadsheetFormulaReferenceTarget[] = []
 
@@ -727,28 +789,32 @@ function resolveReferenceTargets(
       }
 
       const rowId = resolveRowId(row, rowIndex)
-      const targetKey = `${rawIdentifier}:${targetSheet.id}:${rowId}:${columnKey}`
-      if (seen.has(targetKey)) {
-        continue
-      }
+      for (const columnKey of columnKeys) {
+        const targetKey = `${rawIdentifier}:${targetSheet.id}:${rowId}:${columnKey}`
+        if (seen.has(targetKey)) {
+          continue
+        }
 
-      seen.add(targetKey)
-      const target = {
-        occurrenceId,
-        identifier: rawIdentifier,
-        label: resolveReferenceDisplayName(referenceName),
-        toneIndex: dependencyIndex % 6,
-        sheetId: targetSheet.id,
-        sheetKey: targetSheet.key,
-        sheetName: targetSheet.name,
-        isCurrentSheet: targetSheet.id === currentSheet.id,
-        rowId,
-        rowIndex,
-        columnKey,
-        columnLabel,
+        seen.add(targetKey)
+        const columnLabel =
+          targetSheet.columns.find((column) => column.key === columnKey)?.label ?? columnKey
+        const target = {
+          occurrenceId,
+          identifier: rawIdentifier,
+          label: buildReferenceDisplayLabel(referenceName, rangeReferenceName),
+          toneIndex: dependencyIndex % 6,
+          sheetId: targetSheet.id,
+          sheetKey: targetSheet.key,
+          sheetName: targetSheet.name,
+          isCurrentSheet: targetSheet.id === currentSheet.id,
+          rowId,
+          rowIndex,
+          columnKey,
+          columnLabel,
+        }
+        occurrenceTargets.push(target)
+        targets.push(target)
       }
-      occurrenceTargets.push(target)
-      targets.push(target)
     }
 
     if (!occurrenceTargets.length) {
@@ -759,14 +825,14 @@ function resolveReferenceTargets(
     referenceOccurrences.push({
       id: occurrenceId,
       identifier: rawIdentifier,
-      label: resolveReferenceDisplayName(referenceName),
+      label: buildReferenceDisplayLabel(referenceName, rangeReferenceName),
       toneIndex: dependencyIndex % 6,
       sheetId: targetSheet.id,
       sheetKey: targetSheet.key,
       sheetName: targetSheet.name,
       isCurrentSheet: targetSheet.id === currentSheet.id,
-      columnKey,
-      columnLabel,
+      columnKey: primaryTarget?.columnKey ?? columnKeys[0] ?? '',
+      columnLabel: primaryTarget?.columnLabel ?? columnKeys[0] ?? '',
       spanStart,
       spanEnd,
       rowId: occurrenceTargets.length === 1 ? primaryTarget?.rowId ?? null : null,
@@ -789,6 +855,7 @@ function resolveReferenceTargets(
         rawIdentifier,
         reference.sheetReference,
         reference.referenceName,
+        reference.rangeReferenceName ?? null,
         reference.rowSelector,
         dependencyIndex,
         reference.span.start,
@@ -808,6 +875,7 @@ function resolveReferenceTargets(
         reference.rawIdentifier,
         reference.sheetReference,
         reference.referenceName,
+        reference.rangeReferenceName,
         reference.rowSelector,
         dependencyIndex,
         reference.spanStart,
@@ -829,6 +897,7 @@ function collectTokenReferenceTargets(
     rawIdentifier: string
     sheetReference: string | null
     referenceName: string
+    rangeReferenceName: string | null
     rowSelector: DataGridFormulaRowSelector
     spanStart: number
     spanEnd: number
@@ -852,6 +921,7 @@ function collectTokenReferenceTargets(
         rawIdentifier,
         sheetReference: parsed.sheetReference,
         referenceName: parsed.referenceName,
+        rangeReferenceName: parsed.rangeReferenceName,
         rowSelector: parsed.rowSelector,
         spanStart: token.position,
         spanEnd: token.end,
@@ -874,6 +944,7 @@ function collectTokenReferenceTargets(
         rawIdentifier,
         sheetReference: parsed.sheetReference,
         referenceName: parsed.referenceName,
+        rangeReferenceName: parsed.rangeReferenceName,
         rowSelector: parsed.rowSelector,
         spanStart: match.index ?? 0,
         spanEnd: (match.index ?? 0) + rawIdentifier.length,
@@ -891,6 +962,7 @@ function collectAstReferenceNodes(
   output: Array<{
     sheetReference: string | null
     referenceName: string
+    rangeReferenceName: string | null
     rowSelector: DataGridFormulaRowSelector
     span: { start: number; end: number }
   }> = [],
@@ -899,6 +971,7 @@ function collectAstReferenceNodes(
     output.push({
       sheetReference: node.sheetReference,
       referenceName: node.referenceName,
+      rangeReferenceName: node.rangeReferenceName ?? null,
       rowSelector: node.rowSelector,
       span: node.span,
     })
@@ -923,6 +996,210 @@ function collectAstReferenceNodes(
   }
 
   return output
+}
+
+function rebaseSpreadsheetFormulaInputForRowReorder(
+  inputValue: string,
+  previousRows: GridRow[],
+  previousRowIds: readonly string[],
+  nextRowIndexById: ReadonlyMap<string, number>,
+) {
+  const normalizedExpression = normalizeSpreadsheetFormulaExpression(inputValue)
+  if (!normalizedExpression) {
+    return inputValue
+  }
+
+  let references: Array<{
+    sheetReference: string | null
+    referenceName: string
+    rangeReferenceName: string | null
+    rowSelector: DataGridFormulaRowSelector
+    span: { start: number; end: number }
+  }> = []
+
+  try {
+    const parsed = parseDataGridFormulaExpression(normalizedExpression, {
+      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+    })
+    references = collectAstReferenceNodes(parsed.ast)
+  } catch {
+    return inputValue
+  }
+
+  if (!references.length) {
+    return inputValue
+  }
+
+  const replacements = references
+    .map((reference) => {
+      if (reference.sheetReference !== null) {
+        return null
+      }
+
+      if (reference.rowSelector.kind === 'absolute') {
+        const targetRowId = previousRowIds[reference.rowSelector.rowIndex] ?? null
+        if (!targetRowId) {
+          return null
+        }
+
+        const nextRowIndex = nextRowIndexById.get(targetRowId)
+        if (nextRowIndex === undefined) {
+          return null
+        }
+
+        return {
+          start: reference.span.start,
+          end: reference.span.end,
+          replacement: rewriteAbsoluteReferenceIdentifier(
+            normalizedExpression.slice(reference.span.start, reference.span.end),
+            nextRowIndex + 1,
+          ),
+        }
+      }
+
+      if (reference.rowSelector.kind !== 'absolute-window') {
+        return null
+      }
+
+      const startRowId = previousRowIds[reference.rowSelector.startRowIndex] ?? null
+      const endRowId = previousRowIds[reference.rowSelector.endRowIndex] ?? null
+      if (!startRowId || !endRowId) {
+        return null
+      }
+
+      const nextStartRowIndex = nextRowIndexById.get(startRowId)
+      const nextEndRowIndex = nextRowIndexById.get(endRowId)
+      if (nextStartRowIndex === undefined || nextEndRowIndex === undefined) {
+        return null
+      }
+
+      return {
+        start: reference.span.start,
+        end: reference.span.end,
+        replacement: rewriteAbsoluteWindowReferenceIdentifier(
+          normalizedExpression.slice(reference.span.start, reference.span.end),
+          nextStartRowIndex + 1,
+          nextEndRowIndex + 1,
+        ),
+      }
+    })
+    .filter((entry): entry is { start: number; end: number; replacement: string } => Boolean(entry))
+
+  if (!replacements.length) {
+    return inputValue
+  }
+
+  let nextExpression = normalizedExpression
+  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
+    nextExpression =
+      nextExpression.slice(0, replacement.start) +
+      replacement.replacement +
+      nextExpression.slice(replacement.end)
+  }
+
+  if (nextExpression === normalizedExpression) {
+    return inputValue
+  }
+
+  const prefix = /^(\s*=+\s*)/.exec(inputValue)?.[0] ?? '='
+  return `${prefix}${nextExpression}`
+}
+
+function rewriteAbsoluteReferenceIdentifier(rawIdentifier: string, rowNumber: number) {
+  const spans = collectReferenceRowNumberSpans(rawIdentifier)
+  if (!spans.length) {
+    return rawIdentifier
+  }
+
+  return replaceReferenceRowNumberSpans(rawIdentifier, [rowNumber])
+}
+
+function rewriteAbsoluteWindowReferenceIdentifier(
+  rawIdentifier: string,
+  startRowNumber: number,
+  endRowNumber: number,
+) {
+  const spans = collectReferenceRowNumberSpans(rawIdentifier)
+  if (!spans.length) {
+    return rawIdentifier
+  }
+
+  if (spans.length === 1) {
+    return replaceReferenceRowNumberSpans(rawIdentifier, [startRowNumber])
+  }
+
+  return replaceReferenceRowNumberSpans(rawIdentifier, [startRowNumber, endRowNumber])
+}
+
+function collectReferenceRowNumberSpans(rawIdentifier: string) {
+  const spans: Array<{ start: number; end: number }> = []
+  let insideReference = false
+  let isEscaped = false
+
+  for (let index = 0; index < rawIdentifier.length; index += 1) {
+    const character = rawIdentifier[index]
+    if (!character) {
+      continue
+    }
+
+    if (insideReference && isEscaped) {
+      isEscaped = false
+      continue
+    }
+
+    if (insideReference && character === '\\') {
+      isEscaped = true
+      continue
+    }
+
+    if (character === '[') {
+      insideReference = true
+      continue
+    }
+
+    if (character !== ']' || !insideReference) {
+      continue
+    }
+
+    insideReference = false
+    let cursor = index + 1
+    while (cursor < rawIdentifier.length && /\d/.test(rawIdentifier[cursor] ?? '')) {
+      cursor += 1
+    }
+
+    if (cursor > index + 1) {
+      spans.push({ start: index + 1, end: cursor })
+      index = cursor - 1
+    }
+  }
+
+  return spans
+}
+
+function replaceReferenceRowNumberSpans(
+  rawIdentifier: string,
+  rowNumbers: readonly number[],
+) {
+  const spans = collectReferenceRowNumberSpans(rawIdentifier)
+  if (!spans.length) {
+    return rawIdentifier
+  }
+
+  let nextIdentifier = rawIdentifier
+  for (let index = spans.length - 1; index >= 0; index -= 1) {
+    const span = spans[index]
+    if (!span) {
+      continue
+    }
+
+    const replacement = String(rowNumbers[Math.min(index, rowNumbers.length - 1)] ?? rowNumbers[0] ?? '')
+    nextIdentifier =
+      nextIdentifier.slice(0, span.start) +
+      replacement +
+      nextIdentifier.slice(span.end)
+  }
+
+  return nextIdentifier
 }
 
 function resolveFormulaDiagnostics(expression: string) {
@@ -960,6 +1237,7 @@ function parseSpreadsheetReferenceIdentifier(
   return {
     sheetReference: parsedIdentifier.sheetReference,
     referenceName: parsedIdentifier.referenceName,
+    rangeReferenceName: parsedIdentifier.rangeReferenceName,
     rowSelector:
       explicitRowSelector && explicitRowSelector.kind !== 'current'
         ? explicitRowSelector
@@ -1270,6 +1548,58 @@ function resolveReferenceColumnKey(
   }
 
   return null
+}
+
+function resolveReferenceColumnKeys(
+  referenceName: string,
+  rangeReferenceName: string | null,
+  columns: GridColumn[],
+  lookup: ColumnLookupMaps,
+) {
+  const startKey = resolveReferenceColumnKey(referenceName, columns, lookup)
+  if (!startKey) {
+    return []
+  }
+
+  if (!rangeReferenceName || rangeReferenceName === referenceName) {
+    return [startKey]
+  }
+
+  const endKey = resolveReferenceColumnKey(rangeReferenceName, columns, lookup)
+  if (!endKey) {
+    return []
+  }
+
+  const startIndex = columns.findIndex((column) => column.key === startKey)
+  const endIndex = columns.findIndex((column) => column.key === endKey)
+  if (startIndex < 0 || endIndex < 0) {
+    return []
+  }
+
+  const safeStart = Math.min(startIndex, endIndex)
+  const safeEnd = Math.max(startIndex, endIndex)
+  return columns.slice(safeStart, safeEnd + 1).map((column) => column.key)
+}
+
+function buildMissingReferenceMessage(
+  referenceName: string,
+  rangeReferenceName: string | null,
+  sheetName: string,
+) {
+  const displayLabel = buildReferenceDisplayLabel(referenceName, rangeReferenceName)
+  return `Column "${displayLabel}" does not exist on sheet "${sheetName}".`
+}
+
+function buildReferenceDisplayLabel(
+  referenceName: string,
+  rangeReferenceName: string | null,
+) {
+  const startLabel = resolveReferenceDisplayName(referenceName)
+  if (!rangeReferenceName || rangeReferenceName === referenceName) {
+    return startLabel
+  }
+
+  return `${startLabel}:${resolveReferenceDisplayName(rangeReferenceName)}`
 }
 
 function resolveReferenceDisplayName(referenceName: string) {
