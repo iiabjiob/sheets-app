@@ -58,3 +58,25 @@ class SheetUpdateRequest(BaseModel):
 class SheetGridUpdateRequest(BaseModel):
     columns: list[GridColumn] = Field(min_length=1)
     rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SheetCellHistoryActor(BaseModel):
+    id: str | None = None
+    email: str | None = None
+    full_name: str
+    avatar_url: str | None = None
+
+
+class SheetCellHistoryEntry(BaseModel):
+    id: str
+    revision_id: str
+    record_id: str
+    column_key: str
+    previous_value: Any | None = None
+    next_value: Any | None = None
+    changed_at: str
+    actor: SheetCellHistoryActor | None = None
+
+
+class SheetCellHistoryResponse(BaseModel):
+    items: list[SheetCellHistoryEntry] = Field(default_factory=list)

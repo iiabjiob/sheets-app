@@ -57,6 +57,28 @@ export interface SheetGridUpdateInput {
   rows: Record<string, unknown>[]
 }
 
+export interface SheetCellHistoryActor {
+  id: string | null
+  email: string | null
+  full_name: string
+  avatar_url: string | null
+}
+
+export interface SheetCellHistoryEntry {
+  id: string
+  revision_id: string
+  record_id: string
+  column_key: string
+  previous_value: unknown | null
+  next_value: unknown | null
+  changed_at: string
+  actor: SheetCellHistoryActor | null
+}
+
+export interface SheetCellHistoryResponse {
+  items: SheetCellHistoryEntry[]
+}
+
 export interface WorkspaceCollectionResponse {
   items: WorkspaceSummary[]
 }

@@ -16,9 +16,11 @@ const emit = defineEmits<{
 const props = withDefaults(
   defineProps<{
     activeFunctionName?: string | null
+    showHeader?: boolean
   }>(),
   {
     activeFunctionName: null,
+    showHeader: true,
   },
 )
 
@@ -69,7 +71,7 @@ function matchesEntry(entry: FormulaHelpEntry, query: string) {
 
 <template>
   <section class="formula-help" aria-label="Formula help">
-    <header class="formula-help__header">
+    <header v-if="props.showHeader" class="formula-help__header">
       <div class="formula-help__header-copy">
         <span class="formula-help__eyebrow">Formula library</span>
         <h4>Available formulas</h4>

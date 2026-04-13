@@ -1257,13 +1257,37 @@ button:disabled {
   min-height: 0;
   height: 100%;
   display: flex;
+  position: relative;
   overflow: hidden;
   background: var(--color-surface);
 }
 
-.grid-stage__grid > * {
+.grid-stage__grid > :not(.grid-stage__selection-summary) {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.grid-stage__selection-summary {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 7;
+  max-width: calc(100% - 48px);
+  padding: 10px 14px;
+  border: 1px solid rgba(90, 98, 94, 0.24);
+  border-radius: 14px;
+  background: rgba(103, 110, 107, 0.74);
+  color: rgba(247, 249, 247, 0.96);
+  box-shadow: 0 14px 32px rgba(33, 40, 36, 0.14);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .grid-stage__grid .affino-datagrid-app-root,
@@ -1284,15 +1308,44 @@ button:disabled {
   ) !important;
 }
 
-.grid-stage__grid .grid-stage--canvas-chrome,
-.grid-stage__grid .grid-stage--canvas-chrome .grid-body-shell,
-.grid-stage__grid .grid-stage--canvas-chrome .grid-body-pane,
-.grid-stage__grid .grid-stage--canvas-chrome .grid-body-viewport {
-  background: var(--datagrid-viewport-bg) !important;
+.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root,
+.grid-stage--formula-editor-open .grid-stage__grid .grid-stage,
+.grid-stage--formula-reference-mode .grid-stage__grid .affino-datagrid-app-root,
+.grid-stage--formula-reference-mode .grid-stage__grid .grid-stage {
+  --datagrid-selection-range-bg: transparent !important;
+  --datagrid-selection-border-color: transparent !important;
+  --datagrid-selection-overlay-border: transparent !important;
+  --datagrid-selection-handle-border: transparent !important;
+  --datagrid-selection-handle-bg: transparent !important;
+  --datagrid-selection-active-border: transparent !important;
+}
+
+.grid-stage--formula-editor-open .grid-stage__selection-summary,
+.grid-stage--formula-reference-mode .grid-stage__selection-summary {
+  display: none;
+}
+
+.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor,
+.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor.grid-cell--selected,
+.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root .grid-stage--single-cell-selection .grid-cell--selection-anchor {
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--select.grid-cell--selection-anchor:not(.grid-cell--editing)::before,
+.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--select:not(.grid-cell--editing):focus-visible::before,
+.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--date.grid-cell--selection-anchor:not(.grid-cell--editing)::before,
+.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--date:not(.grid-cell--editing):focus-visible::before {
+  opacity: 0 !important;
 }
 
 .grid-stage__grid .grid-cell--formula-origin {
   box-shadow: inset 0 0 0 1px var(--color-accent-strong);
+}
+
+.grid-stage__grid .grid-cell--formula-origin .sheet-cell__value {
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
 }
 
 .grid-stage__grid .grid-cell--formula-reference,

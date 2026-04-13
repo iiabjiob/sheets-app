@@ -7,11 +7,20 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ActivityLogModel, SheetModel, WorkbookModel, WorkspaceMemberModel, WorkspaceModel
+from app.models import (
+    ActivityLogModel,
+    SheetCellRevisionModel,
+    SheetColumnModel,
+    SheetModel,
+    SheetRecordModel,
+    SheetRevisionModel,
+    UserModel,
+    WorkbookModel,
+    WorkspaceMemberModel,
+    WorkspaceModel,
+)
 from app.repositories import workspace_repository
 from app.services.workspace.builders import (
-    build_columns_from_grid_input,
-    build_records,
     build_sheet,
     build_workbook,
     clone_sheet,
@@ -363,19 +372,52 @@ class WorkspaceService:
             updated_at=updated_at,
         )
 
-        # Replace child collections in two phases so unique constraints on existing
-        # sheet columns/records are released before new rows are inserted.
-        sheet.columns.clear()
-        sheet.records.clear()
-        await session.flush()
-
-        sheet.columns = build_columns_from_grid_input(sheet_id=sheet.id, columns=normalized_columns)
-        sheet.records = build_records(
+        current_columns_by_key = {column.key: column for column in sheet.columns}
+        current_records_by_id = {
+            record.id: record for record in sheet.records if not record.archived
+        }
+        revision_id = f"rev_{uuid4().hex[:8]}"
+        cell_revisions = self._build_sheet_cell_revisions(
             sheet_id=sheet.id,
+            revision_id=revision_id,
+            writable_column_keys=writable_column_keys,
+            current_records_by_id=current_records_by_id,
+            next_rows=normalized_rows,
+            created_at=updated_at,
+        )
+
+        self._sync_sheet_columns(
+            session,
+            sheet=sheet,
+            normalized_columns=normalized_columns,
+            existing_columns_by_key=current_columns_by_key,
+            updated_at=updated_at,
+        )
+        self._sync_sheet_records(
+            session,
+            sheet=sheet,
             user_id=user_id,
-            rows=normalized_rows,
+            normalized_rows=normalized_rows,
+            existing_records_by_id=current_records_by_id,
+            updated_at=updated_at,
         )
         sheet.updated_at = updated_at
+        if cell_revisions:
+            self._append_sheet_revision(
+                session,
+                revision_id=revision_id,
+                workspace_id=workspace_id,
+                workbook_id=sheet.workbook_id,
+                sheet_id=sheet.id,
+                user_id=user_id,
+                created_at=updated_at,
+                payload={
+                    "cellChangeCount": len(cell_revisions),
+                    "rowCount": len(normalized_rows),
+                },
+            )
+            await session.flush()
+            session.add_all(cell_revisions)
         self._append_activity(
             session,
             workspace_id=workspace_id,
@@ -393,6 +435,53 @@ class WorkspaceService:
 
         reloaded_sheet = await self._require_sheet(session, user_id, workspace_id, sheet.id, include_grid=True)
         return serialize_sheet(reloaded_sheet, include_grid=True)
+
+    async def get_sheet_cell_history(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        workspace_id: str,
+        sheet_id: str,
+        *,
+        record_id: str,
+        column_key: str,
+    ) -> dict[str, object]:
+        await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=False)
+        history_result = await session.execute(
+            select(SheetCellRevisionModel, SheetRevisionModel, UserModel)
+            .join(SheetRevisionModel, SheetRevisionModel.id == SheetCellRevisionModel.revision_id)
+            .outerjoin(UserModel, UserModel.id == SheetRevisionModel.user_id)
+            .where(
+                SheetCellRevisionModel.sheet_id == sheet_id,
+                SheetCellRevisionModel.record_id == record_id,
+                SheetCellRevisionModel.column_key == column_key,
+            )
+            .order_by(SheetCellRevisionModel.created_at.desc(), SheetCellRevisionModel.id.desc())
+        )
+
+        items = []
+        for cell_revision, revision, actor in history_result.all():
+            items.append(
+                {
+                    "id": cell_revision.id,
+                    "revision_id": revision.id,
+                    "record_id": cell_revision.record_id,
+                    "column_key": cell_revision.column_key,
+                    "previous_value": deepcopy(cell_revision.previous_value_json),
+                    "next_value": deepcopy(cell_revision.next_value_json),
+                    "changed_at": cell_revision.created_at.isoformat(),
+                    "actor": None
+                    if actor is None
+                    else {
+                        "id": actor.id,
+                        "email": actor.email,
+                        "full_name": actor.full_name,
+                        "avatar_url": actor.avatar_url,
+                    },
+                }
+            )
+
+        return {"items": items}
 
     async def delete_sheet(self, session: AsyncSession, user_id: str, workspace_id: str, sheet_id: str) -> None:
         sheet = await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=False)
@@ -669,6 +758,180 @@ class WorkspaceService:
                 created_at=timestamp(),
             )
         )
+
+    def _append_sheet_revision(
+        self,
+        session: AsyncSession,
+        *,
+        revision_id: str,
+        workspace_id: str,
+        workbook_id: str | None,
+        sheet_id: str,
+        user_id: str | None,
+        created_at,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        session.add(
+            SheetRevisionModel(
+                id=revision_id,
+                workspace_id=workspace_id,
+                workbook_id=workbook_id,
+                sheet_id=sheet_id,
+                user_id=user_id,
+                action_type="sheet_grid_updated",
+                payload_json=deepcopy(payload or {}),
+                created_at=created_at,
+            )
+        )
+
+    def _build_sheet_cell_revisions(
+        self,
+        *,
+        sheet_id: str,
+        revision_id: str,
+        writable_column_keys: list[str],
+        current_records_by_id: dict[str, SheetRecordModel],
+        next_rows: list[dict[str, object]],
+        created_at,
+    ) -> list[SheetCellRevisionModel]:
+        next_rows_by_id = {str(row.get("id")): row for row in next_rows}
+        record_ids = set(current_records_by_id) | set(next_rows_by_id)
+        revisions: list[SheetCellRevisionModel] = []
+
+        for record_id in record_ids:
+            previous_values = deepcopy(current_records_by_id.get(record_id).values_json or {}) if record_id in current_records_by_id else {}
+            next_values = deepcopy(next_rows_by_id.get(record_id) or {})
+
+            for column_key in writable_column_keys:
+                previous_value = deepcopy(previous_values.get(column_key))
+                next_value = deepcopy(next_values.get(column_key))
+                if previous_value == next_value:
+                    continue
+
+                revisions.append(
+                    SheetCellRevisionModel(
+                        id=f"cellrev_{uuid4().hex[:8]}",
+                        revision_id=revision_id,
+                        sheet_id=sheet_id,
+                        record_id=record_id,
+                        column_key=column_key,
+                        previous_value_json=previous_value,
+                        next_value_json=next_value,
+                        created_at=created_at,
+                    )
+                )
+
+        return revisions
+
+    def _sync_sheet_columns(
+        self,
+        session: AsyncSession,
+        *,
+        sheet: SheetModel,
+        normalized_columns: list[dict[str, object]],
+        existing_columns_by_key: dict[str, SheetColumnModel],
+        updated_at,
+    ) -> None:
+        next_column_keys = {str(column["key"]) for column in normalized_columns}
+
+        for column in list(sheet.columns):
+            if column.key not in next_column_keys:
+                session.delete(column)
+
+        for position, normalized_column in enumerate(normalized_columns):
+            column_key = str(normalized_column["key"])
+            existing_column = existing_columns_by_key.get(column_key)
+            settings = deepcopy(
+                normalized_column.get("settings")
+                if isinstance(normalized_column.get("settings"), dict)
+                else {}
+            )
+            options = normalized_column.get("options")
+            if isinstance(options, list):
+                normalized_options = [str(option).strip() for option in options if str(option).strip()]
+                if normalized_options:
+                    settings["options"] = normalized_options
+                else:
+                    settings.pop("options", None)
+
+            width = normalized_column.get("width")
+            resolved_width = int(width) if isinstance(width, int) else None
+
+            if existing_column is None:
+                sheet.columns.append(
+                    SheetColumnModel(
+                        id=f"col_{uuid4().hex[:8]}",
+                        sheet_id=sheet.id,
+                        key=column_key,
+                        title=str(normalized_column["label"]),
+                        type=str(normalized_column["column_type"]),
+                        position=position,
+                        width=resolved_width,
+                        nullable=True,
+                        editable=bool(normalized_column["editable"]),
+                        computed=bool(normalized_column["computed"]),
+                        expression=normalized_column.get("expression") or None,
+                        settings_json=settings,
+                        created_at=updated_at,
+                        updated_at=updated_at,
+                    )
+                )
+                continue
+
+            existing_column.title = str(normalized_column["label"])
+            existing_column.type = str(normalized_column["column_type"])
+            existing_column.position = position
+            existing_column.width = resolved_width
+            existing_column.editable = bool(normalized_column["editable"])
+            existing_column.computed = bool(normalized_column["computed"])
+            existing_column.expression = normalized_column.get("expression") or None
+            existing_column.settings_json = settings
+            existing_column.updated_at = updated_at
+
+    def _sync_sheet_records(
+        self,
+        session: AsyncSession,
+        *,
+        sheet: SheetModel,
+        user_id: str,
+        normalized_rows: list[dict[str, object]],
+        existing_records_by_id: dict[str, SheetRecordModel],
+        updated_at,
+    ) -> None:
+        next_record_ids = {str(row.get("id")) for row in normalized_rows}
+
+        for record in list(sheet.records):
+            if record.id not in next_record_ids:
+                session.delete(record)
+
+        for position, normalized_row in enumerate(normalized_rows):
+            record_id = str(normalized_row.get("id"))
+            row_values = deepcopy(normalized_row)
+            row_values.pop("id", None)
+            existing_record = existing_records_by_id.get(record_id)
+
+            if existing_record is None:
+                sheet.records.append(
+                    SheetRecordModel(
+                        id=record_id,
+                        sheet_id=sheet.id,
+                        position=position,
+                        values_json=row_values,
+                        display_values_json=None,
+                        created_by=user_id,
+                        updated_by=user_id,
+                        archived=False,
+                        created_at=updated_at,
+                        updated_at=updated_at,
+                    )
+                )
+                continue
+
+            existing_record.position = position
+            existing_record.values_json = row_values
+            existing_record.updated_by = user_id
+            existing_record.updated_at = updated_at
+            existing_record.archived = False
 
     def _validation_error(self, detail: str) -> HTTPException:
         return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)

@@ -10,6 +10,7 @@ from app.schemas.common import MoveRequest
 from app.schemas.documents import SheetDocumentResponse
 from app.schemas.sheets import (
     SheetCreateRequest,
+    SheetCellHistoryResponse,
     SheetDetail,
     SheetGridUpdateRequest,
     SheetSummary,
@@ -93,6 +94,27 @@ async def get_sheet_document(
 ) -> SheetDocumentResponse:
     return SheetDocumentResponse.model_validate(
         await workspace_service.get_sheet_document(db, current_user.id, workspace_id, sheet_id)
+    )
+
+
+@router.get("/{workspace_id}/sheets/{sheet_id}/cells/history", response_model=SheetCellHistoryResponse)
+async def get_sheet_cell_history(
+    workspace_id: str,
+    sheet_id: str,
+    record_id: str,
+    column_key: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+) -> SheetCellHistoryResponse:
+    return SheetCellHistoryResponse.model_validate(
+        await workspace_service.get_sheet_cell_history(
+            db,
+            current_user.id,
+            workspace_id,
+            sheet_id,
+            record_id=record_id,
+            column_key=column_key,
+        )
     )
 
 

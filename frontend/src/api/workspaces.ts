@@ -1,4 +1,5 @@
 import type {
+  SheetCellHistoryResponse,
   SheetDetail,
   SheetGridUpdateInput,
   SheetDocumentResponse,
@@ -20,6 +21,25 @@ export async function fetchSheetDocument(
   return apiRequest<SheetDocumentResponse>(`/workspaces/${workspaceId}/sheets/${sheetId}`, {
     auth: true,
   })
+}
+
+export async function fetchSheetCellHistory(
+  workspaceId: string,
+  sheetId: string,
+  recordId: string,
+  columnKey: string,
+): Promise<SheetCellHistoryResponse> {
+  const searchParams = new URLSearchParams({
+    record_id: recordId,
+    column_key: columnKey,
+  })
+
+  return apiRequest<SheetCellHistoryResponse>(
+    `/workspaces/${workspaceId}/sheets/${sheetId}/cells/history?${searchParams.toString()}`,
+    {
+      auth: true,
+    },
+  )
 }
 
 export async function createWorkspace(name: string): Promise<WorkspaceSummary> {

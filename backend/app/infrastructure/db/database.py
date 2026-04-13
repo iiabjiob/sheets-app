@@ -44,6 +44,8 @@ async def initialize_database() -> None:
         "workbooks",
         "sheets",
         "sheet_columns",
+        "sheet_revisions",
+        "sheet_cell_revisions",
         "sheet_records",
         "sheet_views",
         "activity_logs",

@@ -34,6 +34,15 @@ export interface SpreadsheetFormulaBuildOptions {
   workbookSheets?: readonly SpreadsheetFormulaWorkbookSheet[]
 }
 
+export interface SpreadsheetFormulaRowInsertRewriteOptions
+  extends Pick<
+    SpreadsheetFormulaBuildOptions,
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName'
+  > {
+  insertAtRowIndex: number
+  rowCount?: number
+}
+
 export interface SpreadsheetFormulaCellResult {
   expression: string
   value: unknown
@@ -132,6 +141,7 @@ interface SpreadsheetFormulaErrorValue {
 }
 
 const compiledFormulaCache = new Map<string, DataGridCompiledFormulaField<GridRow>>()
+const EMPTY_SHEET_ALIAS_SET = new Set<string>()
 
 export const FORMULA_REFERENCE_OPTIONS = {
   syntax: 'smartsheet',
@@ -188,7 +198,6 @@ export function rebaseSpreadsheetFormulaRowsAfterReorder(
 
       const rewrittenValue = rebaseSpreadsheetFormulaInputForRowReorder(
         String(cellValue),
-        previousRows,
         previousRowIds,
         nextRowIndexById,
       )
@@ -208,6 +217,70 @@ export function rebaseSpreadsheetFormulaRowsAfterReorder(
   })
 
   return didRewriteAnyFormula ? rewrittenRows : nextRows
+}
+
+export function rewriteSpreadsheetFormulasForRowInsert(
+  columns: GridColumn[],
+  rows: GridRow[],
+  options: SpreadsheetFormulaRowInsertRewriteOptions,
+) {
+  const rewriter = createSpreadsheetFormulaRowInsertRewriter(options)
+
+  let didRewriteColumns = false
+  const rewrittenColumns = columns.map((column) => {
+    const normalizedExpression = normalizeSpreadsheetFormulaExpression(column.expression)
+    if (!normalizedExpression) {
+      return column
+    }
+
+    const rewrittenExpression = rewriteSpreadsheetFormulaInputForStructuralRowChange(
+      String(column.expression),
+      rewriter,
+    )
+    const nextExpression = normalizeSpreadsheetFormulaExpression(rewrittenExpression)
+    if (nextExpression === normalizedExpression) {
+      return column
+    }
+
+    didRewriteColumns = true
+    return {
+      ...column,
+      expression: nextExpression,
+    }
+  })
+
+  let didRewriteRows = false
+  const rewrittenRows = rows.map((row) => {
+    let nextRow: GridRow | null = null
+
+    for (const [columnKey, cellValue] of Object.entries(row)) {
+      if (!isSpreadsheetFormulaValue(cellValue)) {
+        continue
+      }
+
+      const rewrittenValue = rewriteSpreadsheetFormulaInputForStructuralRowChange(
+        String(cellValue),
+        rewriter,
+      )
+      if (rewrittenValue === cellValue) {
+        continue
+      }
+
+      if (!nextRow) {
+        nextRow = { ...row }
+      }
+
+      nextRow[columnKey] = rewrittenValue
+      didRewriteRows = true
+    }
+
+    return nextRow ?? row
+  })
+
+  return {
+    columns: didRewriteColumns ? rewrittenColumns : columns,
+    rows: didRewriteRows ? rewrittenRows : rows,
+  }
 }
 
 function createSpreadsheetFormulaComputationState(
@@ -998,9 +1071,168 @@ function collectAstReferenceNodes(
   return output
 }
 
+function createSpreadsheetFormulaRowInsertRewriter(
+  options: SpreadsheetFormulaRowInsertRewriteOptions,
+) {
+  const requestedInsertAtRowIndex = Number.isFinite(options.insertAtRowIndex)
+    ? Math.trunc(options.insertAtRowIndex)
+    : 0
+  const requestedRowCount = options.rowCount ?? 1
+
+  return {
+    insertAtRowIndex: Math.max(0, requestedInsertAtRowIndex),
+    rowCount: Math.max(
+      1,
+      Number.isFinite(requestedRowCount) ? Math.trunc(requestedRowCount) : 1,
+    ),
+    currentSheetAliases: buildSpreadsheetFormulaSheetAliasSet([
+      options.currentSheetId,
+      options.currentSheetKey,
+      options.currentSheetName,
+    ]),
+  }
+}
+
+function buildSpreadsheetFormulaSheetAliasSet(values: Array<string | null | undefined>) {
+  const aliases = new Set<string>()
+
+  for (const value of values) {
+    const trimmedValue = value?.trim()
+    if (!trimmedValue) {
+      continue
+    }
+
+    aliases.add(trimmedValue.toLowerCase())
+  }
+
+  return aliases
+}
+
+function rewriteSpreadsheetFormulaInputForStructuralRowChange(
+  inputValue: string,
+  rewriter: {
+    insertAtRowIndex: number
+    rowCount: number
+    currentSheetAliases: ReadonlySet<string>
+  },
+) {
+  const normalizedExpression = normalizeSpreadsheetFormulaExpression(inputValue)
+  if (!normalizedExpression) {
+    return inputValue
+  }
+
+  let references: Array<{
+    sheetReference: string | null
+    referenceName: string
+    rangeReferenceName: string | null
+    rowSelector: DataGridFormulaRowSelector
+    span: { start: number; end: number }
+  }> = []
+
+  try {
+    const parsed = parseDataGridFormulaExpression(normalizedExpression, {
+      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+    })
+    references = collectAstReferenceNodes(parsed.ast)
+  } catch {
+    return inputValue
+  }
+
+  if (!references.length) {
+    return inputValue
+  }
+
+  const replacements = references
+    .map((reference) => {
+      if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, rewriter.currentSheetAliases)) {
+        return null
+      }
+
+      if (reference.rowSelector.kind === 'absolute') {
+        if (reference.rowSelector.rowIndex < rewriter.insertAtRowIndex) {
+          return null
+        }
+
+        return {
+          start: reference.span.start,
+          end: reference.span.end,
+          replacement: rewriteAbsoluteReferenceIdentifier(
+            normalizedExpression.slice(reference.span.start, reference.span.end),
+            reference.rowSelector.rowIndex + rewriter.rowCount + 1,
+          ),
+        }
+      }
+
+      if (reference.rowSelector.kind !== 'absolute-window') {
+        return null
+      }
+
+      const nextStartRowIndex =
+        reference.rowSelector.startRowIndex >= rewriter.insertAtRowIndex
+          ? reference.rowSelector.startRowIndex + rewriter.rowCount
+          : reference.rowSelector.startRowIndex
+      const nextEndRowIndex =
+        reference.rowSelector.endRowIndex >= rewriter.insertAtRowIndex
+          ? reference.rowSelector.endRowIndex + rewriter.rowCount
+          : reference.rowSelector.endRowIndex
+      if (
+        nextStartRowIndex === reference.rowSelector.startRowIndex &&
+        nextEndRowIndex === reference.rowSelector.endRowIndex
+      ) {
+        return null
+      }
+
+      return {
+        start: reference.span.start,
+        end: reference.span.end,
+        replacement: rewriteAbsoluteWindowReferenceIdentifier(
+          normalizedExpression.slice(reference.span.start, reference.span.end),
+          nextStartRowIndex + 1,
+          nextEndRowIndex + 1,
+        ),
+      }
+    })
+    .filter((entry): entry is { start: number; end: number; replacement: string } => Boolean(entry))
+
+  if (!replacements.length) {
+    return inputValue
+  }
+
+  let nextExpression = normalizedExpression
+  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
+    nextExpression =
+      nextExpression.slice(0, replacement.start) +
+      replacement.replacement +
+      nextExpression.slice(replacement.end)
+  }
+
+  if (nextExpression === normalizedExpression) {
+    return inputValue
+  }
+
+  const prefix = /^(\s*=+\s*)/.exec(inputValue)?.[0] ?? ''
+  return `${prefix}${nextExpression}`
+}
+
+function shouldRewriteReferenceForCurrentSheet(
+  sheetReference: string | null,
+  currentSheetAliases: ReadonlySet<string>,
+) {
+  if (sheetReference === null) {
+    return true
+  }
+
+  for (const candidate of buildSheetReferenceCandidates(sheetReference)) {
+    if (currentSheetAliases.has(candidate.trim().toLowerCase())) {
+      return true
+    }
+  }
+
+  return false
+}
+
 function rebaseSpreadsheetFormulaInputForRowReorder(
   inputValue: string,
-  previousRows: GridRow[],
   previousRowIds: readonly string[],
   nextRowIndexById: ReadonlyMap<string, number>,
 ) {
@@ -1032,7 +1264,7 @@ function rebaseSpreadsheetFormulaInputForRowReorder(
 
   const replacements = references
     .map((reference) => {
-      if (reference.sheetReference !== null) {
+      if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, EMPTY_SHEET_ALIAS_SET)) {
         return null
       }
 
