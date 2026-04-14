@@ -200,103 +200,6 @@ interface GridHeaderTarget {
   columnIndex: number
 }
 
-type GridPaneSide = 'left' | 'center' | 'right'
-
-interface GridPaneRowGeometry {
-  rowId: string | null
-  rowIndex: number
-  top: number
-  height: number
-  bottom: number
-}
-
-interface GridPaneGeometryDelta {
-  rowId: string | null
-  rowIndex: number
-  centerTop: number
-  centerHeight: number
-  centerBottom: number
-  leftTop: number | null
-  leftHeight: number | null
-  leftBottom: number | null
-  rightTop: number | null
-  rightHeight: number | null
-  rightBottom: number | null
-  leftTopDelta: number | null
-  leftHeightDelta: number | null
-  leftBottomDelta: number | null
-  rightTopDelta: number | null
-  rightHeightDelta: number | null
-  rightBottomDelta: number | null
-}
-
-interface GridGeometryDiagnosticsSnapshot {
-  timestamp: string
-  devicePixelRatio: number
-  paneCounts: Record<GridPaneSide, number>
-  maxAbsTopDelta: Record<'left' | 'right', number>
-  maxAbsHeightDelta: Record<'left' | 'right', number>
-  maxAbsBottomDelta: Record<'left' | 'right', number>
-  sample: GridPaneGeometryDelta[]
-}
-
-interface GridDiagnosticsRectSnapshot {
-  top: number
-  left: number
-  width: number
-  height: number
-}
-
-interface GridChromeCanvasSnapshot {
-  className: string
-  width: number
-  height: number
-  clientWidth: number
-  clientHeight: number
-  rect: GridDiagnosticsRectSnapshot
-}
-
-interface GridPaintDiagnosticsSnapshot {
-  timestamp: string
-  devicePixelRatio: number
-  stageClassNames: string[]
-  cssVars: {
-    rowDividerSize: string
-    columnDividerSize: string
-    headerDividerSize: string
-    pinnedPaneSeparatorSize: string
-    rowDividerColor: string
-    columnDividerColor: string
-    pinnedLeftBackground: string
-    pinnedRightBackground: string
-  }
-  centerViewport: {
-    scrollTop: number
-    scrollLeft: number
-    clientWidth: number
-    clientHeight: number
-  } | null
-  paneRects: Record<
-    'headerLeft' | 'headerCenter' | 'headerRight' | 'bodyLeft' | 'bodyCenter' | 'bodyRight',
-    GridDiagnosticsRectSnapshot | null
-  >
-  paneContentTransforms: Record<'bodyLeft' | 'bodyCenter' | 'bodyRight', string | null>
-  chromeCanvases: GridChromeCanvasSnapshot[]
-}
-
-declare global {
-  interface Window {
-    __AFFINO_SHEET_GRID_GEOMETRY_DEBUG__?: {
-      enable: () => GridGeometryDiagnosticsSnapshot | null
-      disable: () => null
-      sample: () => GridGeometryDiagnosticsSnapshot | null
-      getLastSample: () => GridGeometryDiagnosticsSnapshot | null
-      samplePaint: () => GridPaintDiagnosticsSnapshot | null
-      getLastPaintSample: () => GridPaintDiagnosticsSnapshot | null
-    }
-  }
-}
-
 interface GridEditingSectionLike {
   editingCellValue: string
   isEditingCell(row: GridSourceRowNode, columnKey: string): boolean
@@ -379,8 +282,6 @@ const GRID_LINES = {
   header: 'columns',
   pinnedSeparators: false,
 } as const
-
-const GRID_GEOMETRY_DIAGNOSTICS_STORAGE_KEY = 'affino:sheet-grid-geometry-debug'
 
 const GRID_VIRTUALIZATION = {
   rows: true,
@@ -486,8 +387,6 @@ let indexPaneCanvasResizeObserver: ResizeObserver | null = null
 let indexPaneCanvasRefreshFrame: number | null = null
 let indexPaneCanvasViewportListenersCleanup: (() => void) | null = null
 let gridCanvasColorProbe: HTMLDivElement | null = null
-let lastGridGeometryDiagnosticsSnapshot: GridGeometryDiagnosticsSnapshot | null = null
-let lastGridPaintDiagnosticsSnapshot: GridPaintDiagnosticsSnapshot | null = null
 
 type IndexPaneSelectionVariant = 'single' | 'top' | 'middle' | 'bottom'
 
@@ -526,10 +425,7 @@ function syncGridChromeCanvasViewports() {
     }
 
     const paneWidth = Math.max(0, Math.round(pane.getBoundingClientRect().width))
-    const targetHeight = Math.max(
-      0,
-      Math.round(viewportHeight ?? pane.getBoundingClientRect().height),
-    )
+    const targetHeight = Math.max(0, Math.round(viewportHeight ?? pane.getBoundingClientRect().height))
 
     canvas.style.left = '0px'
     canvas.style.top = '0px'
@@ -559,350 +455,6 @@ function syncGridChromeCanvasViewports() {
     '.grid-body-pane--right',
     bodyViewport?.clientHeight ?? null,
   )
-}
-
-function roundGridGeometryValue(value: number) {
-  return Number(value.toFixed(3))
-}
-
-function snapshotGridDiagnosticsRect(element: Element | null, rootRect?: DOMRect): GridDiagnosticsRectSnapshot | null {
-  if (!(element instanceof HTMLElement || element instanceof HTMLCanvasElement)) {
-    return null
-  }
-
-  const rect = element.getBoundingClientRect()
-  return {
-    top: roundGridGeometryValue(rootRect ? rect.top - rootRect.top : rect.top),
-    left: roundGridGeometryValue(rootRect ? rect.left - rootRect.left : rect.left),
-    width: roundGridGeometryValue(rect.width),
-    height: roundGridGeometryValue(rect.height),
-  }
-}
-
-function isGridGeometryDiagnosticsEnabled() {
-  if (typeof window === 'undefined') {
-    return false
-  }
-
-  return window.localStorage.getItem(GRID_GEOMETRY_DIAGNOSTICS_STORAGE_KEY) === '1'
-}
-
-function collectGridPaneRowGeometry(root: HTMLElement, side: GridPaneSide): GridPaneRowGeometry[] {
-  const rootRect = root.getBoundingClientRect()
-  const selectorBySide: Record<GridPaneSide, string> = {
-    left: '.grid-body-pane--left .grid-pane-content > .grid-row[data-row-index]',
-    center:
-      '.grid-body-content > .grid-row[data-row-index]:not(.grid-body-pane--left .grid-row):not(.grid-body-pane--right .grid-row)',
-    right: '.grid-body-pane--right .grid-pane-content > .grid-row[data-row-index]',
-  }
-
-  const rows = Array.from(root.querySelectorAll<HTMLElement>(selectorBySide[side]))
-
-  return rows
-    .map((row) => {
-      const rowIndex = Number.parseInt(row.dataset.rowIndex ?? '', 10)
-      if (!Number.isFinite(rowIndex)) {
-        return null
-      }
-
-      const rect = row.getBoundingClientRect()
-      const rowId = row.querySelector<HTMLElement>('[data-row-id]')?.dataset.rowId ?? null
-
-      return {
-        rowId,
-        rowIndex,
-        top: roundGridGeometryValue(rect.top - rootRect.top),
-        height: roundGridGeometryValue(rect.height),
-        bottom: roundGridGeometryValue(rect.bottom - rootRect.top),
-      }
-    })
-    .filter((row): row is GridPaneRowGeometry => row !== null)
-    .sort((leftRow, rightRow) => leftRow.rowIndex - rightRow.rowIndex)
-}
-
-function createGridGeometryDiagnosticsSnapshot(): GridGeometryDiagnosticsSnapshot | null {
-  const root = gridRootRef.value
-  if (!root) {
-    return null
-  }
-
-  const centerRows = collectGridPaneRowGeometry(root, 'center')
-  if (!centerRows.length) {
-    return null
-  }
-
-  const leftRows = collectGridPaneRowGeometry(root, 'left')
-  const rightRows = collectGridPaneRowGeometry(root, 'right')
-  const leftRowsByIndex = new Map(leftRows.map((row) => [row.rowIndex, row]))
-  const rightRowsByIndex = new Map(rightRows.map((row) => [row.rowIndex, row]))
-  const sample = centerRows
-    .map<GridPaneGeometryDelta>((centerRow) => {
-      const leftRow = leftRowsByIndex.get(centerRow.rowIndex) ?? null
-      const rightRow = rightRowsByIndex.get(centerRow.rowIndex) ?? null
-
-      const leftTopDelta = leftRow ? roundGridGeometryValue(leftRow.top - centerRow.top) : null
-      const leftHeightDelta = leftRow ? roundGridGeometryValue(leftRow.height - centerRow.height) : null
-      const leftBottomDelta = leftRow ? roundGridGeometryValue(leftRow.bottom - centerRow.bottom) : null
-      const rightTopDelta = rightRow ? roundGridGeometryValue(rightRow.top - centerRow.top) : null
-      const rightHeightDelta = rightRow ? roundGridGeometryValue(rightRow.height - centerRow.height) : null
-      const rightBottomDelta = rightRow ? roundGridGeometryValue(rightRow.bottom - centerRow.bottom) : null
-
-      return {
-        rowId: centerRow.rowId,
-        rowIndex: centerRow.rowIndex,
-        centerTop: centerRow.top,
-        centerHeight: centerRow.height,
-        centerBottom: centerRow.bottom,
-        leftTop: leftRow?.top ?? null,
-        leftHeight: leftRow?.height ?? null,
-        leftBottom: leftRow?.bottom ?? null,
-        rightTop: rightRow?.top ?? null,
-        rightHeight: rightRow?.height ?? null,
-        rightBottom: rightRow?.bottom ?? null,
-        leftTopDelta,
-        leftHeightDelta,
-        leftBottomDelta,
-        rightTopDelta,
-        rightHeightDelta,
-        rightBottomDelta,
-      }
-    })
-    .sort((leftDelta, rightDelta) => {
-      const leftMagnitude = Math.max(
-        Math.abs(leftDelta.leftTopDelta ?? 0),
-        Math.abs(leftDelta.leftHeightDelta ?? 0),
-        Math.abs(leftDelta.leftBottomDelta ?? 0),
-        Math.abs(leftDelta.rightTopDelta ?? 0),
-        Math.abs(leftDelta.rightHeightDelta ?? 0),
-        Math.abs(leftDelta.rightBottomDelta ?? 0),
-      )
-      const rightMagnitude = Math.max(
-        Math.abs(rightDelta.leftTopDelta ?? 0),
-        Math.abs(rightDelta.leftHeightDelta ?? 0),
-        Math.abs(rightDelta.leftBottomDelta ?? 0),
-        Math.abs(rightDelta.rightTopDelta ?? 0),
-        Math.abs(rightDelta.rightHeightDelta ?? 0),
-        Math.abs(rightDelta.rightBottomDelta ?? 0),
-      )
-
-      return rightMagnitude - leftMagnitude
-    })
-
-  const maxAbs = (
-    values: Array<number | null>,
-  ) =>
-    roundGridGeometryValue(
-      values.reduce<number>((maxValue, value) => Math.max(maxValue, Math.abs(value ?? 0)), 0),
-    )
-
-  return {
-    timestamp: new Date().toISOString(),
-    devicePixelRatio:
-      typeof window === 'undefined' ? 1 : roundGridGeometryValue(Math.max(1, window.devicePixelRatio || 1)),
-    paneCounts: {
-      left: leftRows.length,
-      center: centerRows.length,
-      right: rightRows.length,
-    },
-    maxAbsTopDelta: {
-      left: maxAbs(sample.map((row) => row.leftTopDelta)),
-      right: maxAbs(sample.map((row) => row.rightTopDelta)),
-    },
-    maxAbsHeightDelta: {
-      left: maxAbs(sample.map((row) => row.leftHeightDelta)),
-      right: maxAbs(sample.map((row) => row.rightHeightDelta)),
-    },
-    maxAbsBottomDelta: {
-      left: maxAbs(sample.map((row) => row.leftBottomDelta)),
-      right: maxAbs(sample.map((row) => row.rightBottomDelta)),
-    },
-    sample: sample.slice(0, 16),
-  }
-}
-
-function createGridPaintDiagnosticsSnapshot(): GridPaintDiagnosticsSnapshot | null {
-  const root = gridRootRef.value
-  if (!root) {
-    return null
-  }
-
-  const rootRect = root.getBoundingClientRect()
-  const stage =
-    root.querySelector<HTMLElement>('.affino-datagrid-app-root .grid-stage') ??
-    root.querySelector<HTMLElement>('.grid-stage')
-
-  if (!stage) {
-    return null
-  }
-
-  const stageStyle = getComputedStyle(stage)
-  const centerViewport = root.querySelector<HTMLElement>('.grid-body-viewport')
-  const paneRects = {
-    headerLeft: snapshotGridDiagnosticsRect(root.querySelector('.grid-header-pane--left'), rootRect),
-    headerCenter: snapshotGridDiagnosticsRect(root.querySelector('.grid-header-viewport'), rootRect),
-    headerRight: snapshotGridDiagnosticsRect(root.querySelector('.grid-header-pane--right'), rootRect),
-    bodyLeft: snapshotGridDiagnosticsRect(root.querySelector('.grid-body-pane--left'), rootRect),
-    bodyCenter: snapshotGridDiagnosticsRect(root.querySelector('.grid-body-viewport'), rootRect),
-    bodyRight: snapshotGridDiagnosticsRect(root.querySelector('.grid-body-pane--right'), rootRect),
-  }
-
-  const chromeCanvases = Array.from(root.querySelectorAll<HTMLCanvasElement>('.grid-chrome-canvas')).map(
-    (canvas) => ({
-      className: canvas.className,
-      width: canvas.width,
-      height: canvas.height,
-      clientWidth: canvas.clientWidth,
-      clientHeight: canvas.clientHeight,
-      rect: snapshotGridDiagnosticsRect(canvas, rootRect) ?? {
-        top: 0,
-        left: 0,
-        width: 0,
-        height: 0,
-      },
-    }),
-  )
-
-  return {
-    timestamp: new Date().toISOString(),
-    devicePixelRatio:
-      typeof window === 'undefined' ? 1 : roundGridGeometryValue(Math.max(1, window.devicePixelRatio || 1)),
-    stageClassNames: Array.from(stage.classList),
-    cssVars: {
-      rowDividerSize: stageStyle.getPropertyValue('--datagrid-row-divider-size').trim(),
-      columnDividerSize: stageStyle.getPropertyValue('--datagrid-column-divider-size').trim(),
-      headerDividerSize: stageStyle.getPropertyValue('--datagrid-header-divider-size').trim(),
-      pinnedPaneSeparatorSize: stageStyle.getPropertyValue('--datagrid-pinned-pane-separator-size').trim(),
-      rowDividerColor: stageStyle.getPropertyValue('--datagrid-row-divider-color').trim(),
-      columnDividerColor: stageStyle.getPropertyValue('--datagrid-column-divider-color').trim(),
-      pinnedLeftBackground: stageStyle.getPropertyValue('--datagrid-pinned-left-bg').trim(),
-      pinnedRightBackground: stageStyle.getPropertyValue('--datagrid-pinned-right-bg').trim(),
-    },
-    centerViewport: centerViewport
-      ? {
-          scrollTop: roundGridGeometryValue(centerViewport.scrollTop),
-          scrollLeft: roundGridGeometryValue(centerViewport.scrollLeft),
-          clientWidth: centerViewport.clientWidth,
-          clientHeight: centerViewport.clientHeight,
-        }
-      : null,
-    paneRects,
-    paneContentTransforms: {
-      bodyLeft:
-        root.querySelector<HTMLElement>('.grid-body-pane--left .grid-pane-content')?.style.transform || null,
-      bodyCenter:
-        root.querySelector<HTMLElement>('.grid-body-viewport .grid-body-content')?.style.transform || null,
-      bodyRight:
-        root.querySelector<HTMLElement>('.grid-body-pane--right .grid-pane-content')?.style.transform || null,
-    },
-    chromeCanvases,
-  }
-}
-
-function logGridGeometryDiagnosticsSnapshot(snapshot: GridGeometryDiagnosticsSnapshot | null) {
-  if (!snapshot || typeof console === 'undefined') {
-    return snapshot
-  }
-
-  console.groupCollapsed(
-    `[SheetStage] grid geometry dpr=${snapshot.devicePixelRatio} rows c:${snapshot.paneCounts.center} l:${snapshot.paneCounts.left} r:${snapshot.paneCounts.right}`,
-  )
-  console.log({
-    paneCounts: snapshot.paneCounts,
-    maxAbsTopDelta: snapshot.maxAbsTopDelta,
-    maxAbsHeightDelta: snapshot.maxAbsHeightDelta,
-    maxAbsBottomDelta: snapshot.maxAbsBottomDelta,
-    note: 'Logical row model is shared, but center/left/right are rendered as separate pane surfaces. This sample compares final DOM geometry per visible row.',
-  })
-  console.table(snapshot.sample)
-  console.groupEnd()
-
-  return snapshot
-}
-
-function refreshGridGeometryDiagnosticsSnapshot(options?: { forceLog?: boolean }) {
-  const shouldSample = options?.forceLog || isGridGeometryDiagnosticsEnabled()
-  if (!shouldSample) {
-    return null
-  }
-
-  const snapshot = createGridGeometryDiagnosticsSnapshot()
-  lastGridGeometryDiagnosticsSnapshot = snapshot
-
-  if (options?.forceLog) {
-    return logGridGeometryDiagnosticsSnapshot(snapshot)
-  }
-
-  return snapshot
-}
-
-function logGridPaintDiagnosticsSnapshot(snapshot: GridPaintDiagnosticsSnapshot | null) {
-  if (!snapshot || typeof console === 'undefined') {
-    return snapshot
-  }
-
-  console.groupCollapsed(
-    `[SheetStage] grid paint dpr=${snapshot.devicePixelRatio} canvases=${snapshot.chromeCanvases.length}`,
-  )
-  console.log({
-    stageClassNames: snapshot.stageClassNames,
-    cssVars: snapshot.cssVars,
-    centerViewport: snapshot.centerViewport,
-    paneRects: snapshot.paneRects,
-    paneContentTransforms: snapshot.paneContentTransforms,
-    note: 'If row geometry is identical but Windows still shows thicker seams, compare these pane rects/canvas sizes between macOS and Windows.',
-  })
-  console.table(snapshot.chromeCanvases)
-  console.groupEnd()
-
-  return snapshot
-}
-
-function refreshGridPaintDiagnosticsSnapshot(options?: { forceLog?: boolean }) {
-  const shouldSample = options?.forceLog || isGridGeometryDiagnosticsEnabled()
-  if (!shouldSample) {
-    return null
-  }
-
-  const snapshot = createGridPaintDiagnosticsSnapshot()
-  lastGridPaintDiagnosticsSnapshot = snapshot
-
-  if (options?.forceLog) {
-    return logGridPaintDiagnosticsSnapshot(snapshot)
-  }
-
-  return snapshot
-}
-
-function installGridGeometryDiagnosticsDebugApi() {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  window.__AFFINO_SHEET_GRID_GEOMETRY_DEBUG__ = {
-    enable: () => {
-      window.localStorage.setItem(GRID_GEOMETRY_DIAGNOSTICS_STORAGE_KEY, '1')
-      return refreshGridGeometryDiagnosticsSnapshot({ forceLog: true })
-    },
-    disable: () => {
-      window.localStorage.removeItem(GRID_GEOMETRY_DIAGNOSTICS_STORAGE_KEY)
-      lastGridGeometryDiagnosticsSnapshot = null
-      return null
-    },
-    sample: () => refreshGridGeometryDiagnosticsSnapshot({ forceLog: true }),
-    getLastSample: () => lastGridGeometryDiagnosticsSnapshot,
-    samplePaint: () => refreshGridPaintDiagnosticsSnapshot({ forceLog: true }),
-    getLastPaintSample: () => lastGridPaintDiagnosticsSnapshot,
-  }
-}
-
-function uninstallGridGeometryDiagnosticsDebugApi() {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  if (window.__AFFINO_SHEET_GRID_GEOMETRY_DEBUG__) {
-    delete window.__AFFINO_SHEET_GRID_GEOMETRY_DEBUG__
-  }
 }
 
 function clearPlaceholderRowsRestoreFrame() {
@@ -1172,7 +724,6 @@ function scheduleIndexPaneCanvasRefresh() {
     syncGridChromeCanvasViewports()
     drawIndexPaneCanvas()
     ensureIndexPaneCanvasObserver()
-    refreshGridGeometryDiagnosticsSnapshot()
   })
 }
 
@@ -2385,7 +1936,6 @@ onMounted(() => {
     return
   }
 
-  installGridGeometryDiagnosticsDebugApi()
   window.addEventListener('keydown', handleWindowHistoryKeydown, true)
 })
 
@@ -2395,7 +1945,6 @@ onBeforeUnmount(() => {
   }
 
   window.removeEventListener('keydown', handleWindowHistoryKeydown, true)
-  uninstallGridGeometryDiagnosticsDebugApi()
   clearPlaceholderRowsRestoreFrame()
   clearIndexPaneCanvasRefreshFrame()
   disconnectIndexPaneCanvasViewportListeners()
