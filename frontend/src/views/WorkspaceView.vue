@@ -12,7 +12,9 @@ import WorkspaceTree from '@/components/WorkspaceTree.vue'
 import { useUnsavedChangesPrompt } from '@/composables/useUnsavedChangesPrompt'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspacesStore } from '@/stores/workspaces'
-import type { SheetGridUpdateInput } from '@/types/workspace'
+import type { GridColumn, SheetDetail, SheetGridUpdateInput } from '@/types/workspace'
+import { resolveGridColumnFormulaReferenceName } from '@/utils/spreadsheetColumnModel'
+import { rewriteSpreadsheetFormulasForColumnReferenceNameRename } from '@/utils/spreadsheetFormula'
 
 interface SheetStageHandle {
   flushDraftChange(): void
@@ -137,12 +139,102 @@ const saveStatusLabel = computed(() => {
     return 'Saving...'
   }
 
-  if (sheetSaveError.value && hasUnsavedGridChanges.value) {
+  if (sheetSaveError.value) {
     return 'Save failed'
   }
 
   return hasUnsavedGridChanges.value ? 'Unsaved changes' : 'All changes saved'
 })
+
+interface ColumnReferenceRenameOperation {
+  previousReferenceName: string
+  nextReferenceName: string
+}
+
+function collectColumnReferenceRenameOperations(
+  previousColumns: readonly GridColumn[],
+  nextColumns: readonly GridColumn[],
+) {
+  const previousColumnByKey = new Map(previousColumns.map((column) => [column.key, column]))
+
+  return nextColumns.flatMap<ColumnReferenceRenameOperation>((column) => {
+    const previousColumn = previousColumnByKey.get(column.key)
+    if (!previousColumn) {
+      return []
+    }
+
+    const previousReferenceName = resolveGridColumnFormulaReferenceName(previousColumn)
+    const nextReferenceName = resolveGridColumnFormulaReferenceName(column)
+    if (!previousReferenceName || previousReferenceName === nextReferenceName) {
+      return []
+    }
+
+    return [{ previousReferenceName, nextReferenceName }]
+  })
+}
+
+function cloneGridPayload(payload: SheetGridUpdateInput): SheetGridUpdateInput {
+  return {
+    columns: payload.columns.map((column) => ({
+      ...column,
+      options: [...column.options],
+      settings: { ...column.settings },
+    })),
+    rows: payload.rows.map((row) => ({ ...row })),
+  }
+}
+
+async function syncCrossSheetColumnReferenceRenames(
+  workspaceId: string,
+  sourceSheet: SheetDetail,
+  renameOperations: readonly ColumnReferenceRenameOperation[],
+) {
+  if (!renameOperations.length) {
+    return
+  }
+
+  const workbookSheets = workspacesStore.activeWorkbookSheets
+  if (workbookSheets.length <= 1) {
+    return
+  }
+
+  const updatedWorkbookSheets = workbookSheets.map((sheet) =>
+    sheet.id === sourceSheet.id ? sourceSheet : sheet,
+  )
+
+  for (const workbookSheet of updatedWorkbookSheets) {
+    if (workbookSheet.id === sourceSheet.id) {
+      continue
+    }
+
+    let nextColumns = workbookSheet.columns
+    let nextRows = workbookSheet.rows
+
+    for (const operation of renameOperations) {
+      const rewritten = rewriteSpreadsheetFormulasForColumnReferenceNameRename(nextColumns, nextRows, {
+        currentSheetId: sourceSheet.id,
+        currentSheetKey: sourceSheet.key,
+        currentSheetName: sourceSheet.name,
+        workbookSheets: updatedWorkbookSheets,
+        previousReferenceName: operation.previousReferenceName,
+        nextReferenceName: operation.nextReferenceName,
+        includeImplicitReferences: false,
+      })
+
+      nextColumns = rewritten.columns
+      nextRows = rewritten.rows
+    }
+
+    if (nextColumns === workbookSheet.columns && nextRows === workbookSheet.rows) {
+      continue
+    }
+
+    await workspacesStore.syncSheetGrid(workspaceId, workbookSheet.id, cloneGridPayload({
+      columns: nextColumns,
+      rows: nextRows,
+    }))
+  }
+}
 
 const {
   prompt: unsavedChangesPrompt,
@@ -488,10 +580,20 @@ async function performSaveActiveSheetDraft() {
   sheetSaveError.value = null
 
   try {
-    await workspacesStore.syncSheetGrid(
+    const activeSheetBeforeSave = workspacesStore.activeSheet
+    const renameOperations = activeSheetBeforeSave
+      ? collectColumnReferenceRenameOperations(activeSheetBeforeSave.columns, payload.columns)
+      : []
+
+    const updatedActiveSheet = await workspacesStore.syncSheetGrid(
       workspacesStore.activeWorkspaceId,
       workspacesStore.activeSheetId,
       payload,
+    )
+    await syncCrossSheetColumnReferenceRenames(
+      workspacesStore.activeWorkspaceId,
+      updatedActiveSheet,
+      renameOperations,
     )
     sheetStageRef.value?.markCommitted(payload)
     pendingGridDraftWorkspaceId.value = workspacesStore.activeWorkspaceId

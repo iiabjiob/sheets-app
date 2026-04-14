@@ -3,10 +3,12 @@ export type GridColumnType =
   | 'text'
   | 'number'
   | 'currency'
+  | 'checkbox'
   | 'date'
   | 'datetime'
   | 'duration'
   | 'percent'
+  | 'select'
   | 'status'
   | 'user'
   | 'formula'
@@ -14,6 +16,7 @@ export type GridColumnType =
 export interface GridColumn {
   key: string
   label: string
+  formula_alias: string | null
   data_type: GridColumnDataType
   column_type: GridColumnType
   width: number | null

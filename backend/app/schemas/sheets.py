@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.workspace.validation import normalize_and_validate_formula_alias
 
 GridColumnDataType = Literal["text", "number", "currency", "date", "status"]
 GridColumnType = Literal[
@@ -22,6 +24,7 @@ GridColumnType = Literal[
 class GridColumn(BaseModel):
     key: str
     label: str
+    formula_alias: str | None = None
     data_type: GridColumnDataType = "text"
     column_type: GridColumnType = "text"
     width: int | None = None
@@ -30,6 +33,11 @@ class GridColumn(BaseModel):
     expression: str | None = None
     options: list[str] = Field(default_factory=list)
     settings: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("formula_alias", mode="before")
+    @classmethod
+    def validate_formula_alias(cls, value: object) -> str | None:
+        return normalize_and_validate_formula_alias(value)
 
 
 class SheetSummary(BaseModel):

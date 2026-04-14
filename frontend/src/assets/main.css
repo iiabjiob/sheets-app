@@ -1262,7 +1262,7 @@ button:disabled {
   background: var(--color-surface);
 }
 
-.sheet-grid-stage__grid > :not(.sheet-grid-stage__selection-summary) {
+.sheet-grid-stage__grid > :not(.sheet-grid-stage__selection-summary):not(.sheet-grid-stage__index-pane-canvas):not(.sheet-grid-stage__formula-reference-canvas) {
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -1306,6 +1306,30 @@ button:disabled {
     var(--datagrid-column-divider-color) 72%,
     transparent
   ) !important;
+  --sheet-grid-index-selection-fill: rgba(31, 143, 82, 0.06);
+  --sheet-grid-index-selection-stroke: var(--color-accent);
+}
+
+.sheet-grid-stage__index-pane-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.sheet-grid-stage__index-pane-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.sheet-grid-stage__grid > .affino-datagrid-app-root {
+  position: relative;
+  z-index: 1;
+}
+
+.sheet-grid-stage__grid .datagrid-stage__row-index-cell.grid-cell--index-selected::before {
+  display: none;
 }
 
 .sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root,
@@ -1361,25 +1385,17 @@ button:disabled {
   z-index: 1;
 }
 
-.sheet-grid-stage__grid .grid-cell--formula-reference::before {
-  content: '';
+.sheet-grid-stage__formula-reference-canvas {
   position: absolute;
   inset: 0;
-  border: 1px dashed var(--formula-reference-color, var(--formula-tone-0));
+  z-index: 3;
   pointer-events: none;
-  box-sizing: border-box;
 }
 
-.sheet-grid-stage__grid .grid-cell--formula-reference::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) top left / 5px 5px no-repeat,
-    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) top right / 5px 5px no-repeat,
-    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) bottom left / 5px 5px no-repeat,
-    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) bottom right / 5px 5px no-repeat;
-  pointer-events: none;
+.sheet-grid-stage__formula-reference-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .sheet-grid-stage__grid .grid-cell--formula-reference--draggable {
@@ -1389,12 +1405,6 @@ button:disabled {
 .sheet-grid-stage__grid .grid-cell--formula-reference--draggable:active,
 .sheet-grid-stage__grid .grid-cell--formula-reference--active {
   cursor: grabbing;
-}
-
-.sheet-grid-stage__grid .grid-cell--formula-reference--active::before {
-  border-style: dashed;
-  border-width: 1px;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--formula-reference-color, var(--formula-tone-0)) 18%, transparent);
 }
 
 .sheet-grid-stage__grid .grid-cell--formula-reference-header {

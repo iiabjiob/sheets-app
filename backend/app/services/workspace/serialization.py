@@ -5,6 +5,7 @@ from copy import deepcopy
 from app.models import SheetColumnModel, SheetModel, SheetRecordModel, WorkspaceModel
 from app.services.workspace.constants import WORKSPACE_COLORS
 from app.services.workspace.ordering import sort_columns, sort_records, sort_sheets, sort_workbooks
+from app.services.workspace.validation import sanitize_formula_alias
 
 
 def column_type_to_grid_data_type(value: str) -> str:
@@ -46,10 +47,13 @@ def column_options(settings_json: dict[str, object] | None) -> list[str]:
 
 def serialize_sheet_column(column: SheetColumnModel) -> dict[str, object]:
     settings = deepcopy(column.settings_json or {})
+    raw_formula_alias = settings.pop("formulaAlias", settings.pop("formula_alias", None))
+    formula_alias = sanitize_formula_alias(raw_formula_alias)
 
     return {
         "key": column.key,
         "label": column.title,
+        "formula_alias": formula_alias,
         "data_type": column_type_to_grid_data_type(column.type),
         "column_type": column.type,
         "width": column.width,

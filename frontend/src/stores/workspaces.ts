@@ -415,11 +415,17 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
       const updatedSheet = await syncSheetGridRequest(workspaceId, sheetId, payload)
       applySheetSummary(workspaceId, updatedSheet)
 
-      if (activeWorkspaceId.value === workspaceId && activeSheetId.value === sheetId) {
-        activeSheet.value = updatedSheet
+      if (activeWorkbookSheets.value.some((sheet) => sheet.id === sheetId)) {
         activeWorkbookSheets.value = activeWorkbookSheets.value.map((sheet) =>
           sheet.id === sheetId ? updatedSheet : sheet,
         )
+      }
+
+      if (activeWorkspaceId.value === workspaceId && activeSheetId.value === sheetId) {
+        activeSheet.value = updatedSheet
+        if (!activeWorkbookSheets.value.some((sheet) => sheet.id === sheetId)) {
+          activeWorkbookSheets.value = [...activeWorkbookSheets.value, updatedSheet]
+        }
       }
 
       return updatedSheet

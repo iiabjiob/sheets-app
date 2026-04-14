@@ -1,4 +1,11 @@
 import type { Ref } from 'vue'
+import {
+  formatDataGridSpreadsheetFormulaReference,
+  insertDataGridSpreadsheetFormulaReference,
+  resolveDataGridSpreadsheetActiveFormulaReference,
+  type DataGridSpreadsheetFormulaReferenceInput,
+  type DataGridSpreadsheetFormulaReferenceSpan,
+} from '@affino/datagrid-core'
 
 import type { FormulaCaretSelection } from '@/formulas/formulaAutocomplete'
 import type {
@@ -9,6 +16,7 @@ import type {
   InlineFormulaSelectionReferenceState,
 } from '@/composables/inlineFormulaTypes'
 import {
+  FORMULA_REFERENCE_OPTIONS,
   normalizeSpreadsheetFormulaExpression,
   type SpreadsheetFormulaReferenceOccurrence,
 } from '@/utils/spreadsheetFormula'
@@ -34,6 +42,11 @@ interface GridSelectionSnapshotLike {
   } | null
 }
 
+interface InlineFormulaReferenceDescriptor {
+  text: string
+  input: DataGridSpreadsheetFormulaReferenceInput
+}
+
 export function useInlineFormulaSelectionInteractions(input: {
   inlineFormulaCell: Ref<InlineFormulaCellState | null>
   inlineFormulaValue: Ref<string>
@@ -44,6 +57,7 @@ export function useInlineFormulaSelectionInteractions(input: {
     columnKey: string
     toneIndex?: number | null
   } | null>
+  inlineFormulaReferenceSpans: Ref<readonly DataGridSpreadsheetFormulaReferenceSpan[]>
   inlineFormulaReferenceOccurrences: Ref<readonly SpreadsheetFormulaReferenceOccurrence[]>
   inlineFormulaSelectionReferenceState: Ref<InlineFormulaSelectionReferenceState | null>
   inlineFormulaReferenceInsertAnchorState: Ref<InlineFormulaReferenceInsertAnchorState | null>
@@ -87,6 +101,23 @@ export function useInlineFormulaSelectionInteractions(input: {
   function resolveInlineFormulaReferenceOccurrenceAtSelection(
     selection = input.inlineFormulaSelection.value,
   ) {
+    const activeReference = resolveDataGridSpreadsheetActiveFormulaReference(
+      input.inlineFormulaReferenceSpans.value,
+      selection,
+    )
+    if (activeReference) {
+      const expressionPrefixLength = resolveInlineFormulaPrefix(input.inlineFormulaValue.value).length
+      const matchedOccurrence =
+        input.inlineFormulaReferenceOccurrences.value.find(
+          (occurrence) =>
+            occurrence.spanStart + expressionPrefixLength === activeReference.span.start &&
+            occurrence.spanEnd + expressionPrefixLength === activeReference.span.end,
+        ) ?? null
+      if (matchedOccurrence) {
+        return matchedOccurrence
+      }
+    }
+
     const expressionSelection = resolveInlineFormulaExpressionSelection(selection)
     const collapsedIndex = expressionSelection.end
 
@@ -104,13 +135,38 @@ export function useInlineFormulaSelectionInteractions(input: {
     )
   }
 
-  function beginInlineFormulaSelectionReference() {
+  function buildAppendInlineFormulaSelectionReferenceState() {
+    const expressionSelection = resolveInlineFormulaExpressionSelection()
+    const insertionIndex = expressionSelection.end
+    const beforeInsertion = expressionSelection.baseExpression.slice(0, insertionIndex)
+    const afterInsertion = expressionSelection.baseExpression.slice(insertionIndex)
+    const trimmedBeforeInsertion = beforeInsertion.trimEnd()
+    const needsLeadingComma =
+      trimmedBeforeInsertion.length > 0 && !/[,(+\-*/^&]$/.test(trimmedBeforeInsertion)
+    const nextBeforeInsertion = needsLeadingComma ? `${trimmedBeforeInsertion},` : beforeInsertion
+    const replaceOffset = nextBeforeInsertion.length
+
+    return {
+      expressionPrefix: expressionSelection.expressionPrefix,
+      baseExpression: `${nextBeforeInsertion}${afterInsertion}`,
+      replaceStart: replaceOffset,
+      replaceEnd: replaceOffset,
+    }
+  }
+
+  function beginInlineFormulaSelectionReference(options?: { append?: boolean }) {
     if (!input.inlineFormulaCell.value) {
       return null
     }
 
-    if (input.inlineFormulaSelectionReferenceState.value) {
+    if (!options?.append && input.inlineFormulaSelectionReferenceState.value) {
       return input.inlineFormulaSelectionReferenceState.value
+    }
+
+    if (options?.append) {
+      const nextAppendState = buildAppendInlineFormulaSelectionReferenceState()
+      input.inlineFormulaSelectionReferenceState.value = nextAppendState
+      return nextAppendState
     }
 
     const expressionSelection = resolveInlineFormulaExpressionSelection()
@@ -150,13 +206,29 @@ export function useInlineFormulaSelectionInteractions(input: {
     }
   }
 
-  function buildFormulaReference(columnKey: string, targetRowIndex: number, currentRowIndex: number) {
-    const columnReferenceName = columnKey.replace(/\\/g, '\\\\').replace(/\]/g, '\\\]')
-    if (targetRowIndex === currentRowIndex) {
-      return `[${columnReferenceName}]@row`
+  function formatInlineFormulaReference(
+    reference: DataGridSpreadsheetFormulaReferenceInput,
+    currentRowIndex: number,
+  ): InlineFormulaReferenceDescriptor {
+    return {
+      text: formatDataGridSpreadsheetFormulaReference(reference, {
+        currentRowIndex,
+        outputSyntax: 'smartsheet',
+        referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+      }),
+      input: reference,
     }
+  }
 
-    return `[${columnReferenceName}]${targetRowIndex + 1}`
+  function buildFormulaReference(columnKey: string, targetRowIndex: number, currentRowIndex: number) {
+    const columnReferenceName = input.resolveColumnLabel(columnKey)
+    return formatInlineFormulaReference(
+      {
+        referenceName: columnReferenceName,
+        rowIndex: targetRowIndex,
+      },
+      currentRowIndex,
+    )
   }
 
   function buildFormulaRangeReference(
@@ -165,16 +237,66 @@ export function useInlineFormulaSelectionInteractions(input: {
     startRowIndex: number,
     endRowIndex: number,
   ) {
-    const startColumnReferenceName = startColumnKey
-      .replace(/\\/g, '\\\\')
-      .replace(/\]/g, '\\\]')
-    const endColumnReferenceName = endColumnKey.replace(/\\/g, '\\\\').replace(/\]/g, '\\\]')
+    const startColumnReferenceName = input.resolveColumnLabel(startColumnKey)
+    const endColumnReferenceName = input.resolveColumnLabel(endColumnKey)
 
-    return `[${startColumnReferenceName}]${startRowIndex + 1}:[${endColumnReferenceName}]${endRowIndex + 1}`
+    return formatInlineFormulaReference(
+      {
+        referenceName: startColumnReferenceName,
+        rangeReferenceName: endColumnReferenceName,
+        rowSelector: {
+          kind: 'absolute-window',
+          startRowIndex,
+          endRowIndex,
+        },
+      },
+      startRowIndex,
+    )
   }
 
   function resolveFormulaReferenceCaretOffset(reference: string) {
     return reference.length
+  }
+
+  function applyInlineFormulaReferenceEdit(inputValue: {
+    baseExpression: string
+    expressionPrefix: string
+    replaceStart: number
+    replaceEnd: number
+    reference: InlineFormulaReferenceDescriptor
+    currentRowIndex: number
+    selectionMode?: 'collapse-to-end' | 'preserve-current'
+  }) {
+    const selectionMode = inputValue.selectionMode ?? 'collapse-to-end'
+
+    const result = insertDataGridSpreadsheetFormulaReference(
+      `${inputValue.expressionPrefix}${inputValue.baseExpression}`,
+      inputValue.reference.input,
+      {
+        selection: {
+          start: inputValue.expressionPrefix.length + inputValue.replaceStart,
+          end: inputValue.expressionPrefix.length + inputValue.replaceEnd,
+        },
+        ensureFormulaPrefix: false,
+        currentRowIndex: inputValue.currentRowIndex,
+        outputSyntax: 'smartsheet',
+        referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+      },
+    )
+
+    if (selectionMode === 'preserve-current') {
+      return input.coerceFormulaEditorState(
+        result.input,
+        input.inlineFormulaSelection.value.start,
+        input.inlineFormulaSelection.value.end,
+      )
+    }
+
+    return input.coerceFormulaEditorState(
+      result.input,
+      result.selection.start,
+      result.selection.end,
+    )
   }
 
   function buildFormulaReferenceFromSelectionSnapshot(
@@ -225,16 +347,14 @@ export function useInlineFormulaSelectionInteractions(input: {
       return
     }
 
-    const nextExpression = `${selectionReferenceState.baseExpression.slice(0, selectionReferenceState.replaceStart)}${reference}${selectionReferenceState.baseExpression.slice(selectionReferenceState.replaceEnd)}`
-    const nextCaret =
-      selectionReferenceState.expressionPrefix.length +
-      selectionReferenceState.replaceStart +
-      resolveFormulaReferenceCaretOffset(reference)
-    const nextState = input.coerceFormulaEditorState(
-      `${selectionReferenceState.expressionPrefix}${nextExpression}`,
-      nextCaret,
-      nextCaret,
-    )
+    const nextState = applyInlineFormulaReferenceEdit({
+      baseExpression: selectionReferenceState.baseExpression,
+      expressionPrefix: selectionReferenceState.expressionPrefix,
+      replaceStart: selectionReferenceState.replaceStart,
+      replaceEnd: selectionReferenceState.replaceEnd,
+      reference,
+      currentRowIndex: currentFormulaCell.rowIndex,
+    })
 
     input.inlineFormulaValue.value = nextState.value
     input.setInlineFormulaSelection({
@@ -272,24 +392,26 @@ export function useInlineFormulaSelectionInteractions(input: {
         columnKey: anchorColumnKey,
         expressionPrefix: selectionReferenceState.expressionPrefix,
         replaceStart: selectionReferenceState.replaceStart,
-        replaceEnd: selectionReferenceState.replaceStart + reference.length,
+        replaceEnd: selectionReferenceState.replaceStart + reference.text.length,
       }
     }
   }
 
-  function applyInlineFormulaReference(reference: string, pointerState: FormulaReferencePointerState) {
+  function applyInlineFormulaReference(
+    reference: InlineFormulaReferenceDescriptor,
+    pointerState: FormulaReferencePointerState,
+    currentRowIndex: number,
+  ) {
     const replaceStart = pointerState.replaceStart ?? 0
     const replaceEnd = pointerState.replaceEnd ?? pointerState.baseExpression.length
-    const nextExpression = `${pointerState.baseExpression.slice(0, replaceStart)}${reference}${pointerState.baseExpression.slice(replaceEnd)}`
-    const nextCaret =
-      pointerState.expressionPrefix.length +
-      replaceStart +
-      reference.length
-    const nextState = input.coerceFormulaEditorState(
-      `${pointerState.expressionPrefix}${nextExpression}`,
-      nextCaret,
-      nextCaret,
-    )
+    const nextState = applyInlineFormulaReferenceEdit({
+      baseExpression: pointerState.baseExpression,
+      expressionPrefix: pointerState.expressionPrefix,
+      replaceStart,
+      replaceEnd,
+      reference,
+      currentRowIndex,
+    })
 
     input.inlineFormulaValue.value = nextState.value
     input.setInlineFormulaSelection({
@@ -304,7 +426,7 @@ export function useInlineFormulaSelectionInteractions(input: {
         columnKey: pointerState.columnKey,
         expressionPrefix: pointerState.expressionPrefix,
         replaceStart,
-        replaceEnd: replaceStart + reference.length,
+        replaceEnd: replaceStart + reference.text.length,
       }
     }
   }
@@ -348,16 +470,14 @@ export function useInlineFormulaSelectionInteractions(input: {
             startRowIndex,
             endRowIndex,
           )
-    const nextExpression = `${currentExpression.slice(0, replaceStart)}${reference}${currentExpression.slice(replaceEnd)}`
-    const nextCaret =
-      anchorState.expressionPrefix.length +
-      replaceStart +
-      resolveFormulaReferenceCaretOffset(reference)
-    const nextState = input.coerceFormulaEditorState(
-      `${anchorState.expressionPrefix}${nextExpression}`,
-      nextCaret,
-      nextCaret,
-    )
+    const nextState = applyInlineFormulaReferenceEdit({
+      baseExpression: currentExpression,
+      expressionPrefix: anchorState.expressionPrefix,
+      replaceStart,
+      replaceEnd,
+      reference,
+      currentRowIndex: activeFormulaCell.rowIndex,
+    })
 
     input.inlineFormulaValue.value = nextState.value
     input.setInlineFormulaSelection({
@@ -372,7 +492,7 @@ export function useInlineFormulaSelectionInteractions(input: {
     input.inlineFormulaReferenceInsertAnchorState.value = {
       ...anchorState,
       replaceStart,
-      replaceEnd: replaceStart + reference.length,
+      replaceEnd: replaceStart + reference.text.length,
     }
   }
 
@@ -417,7 +537,7 @@ export function useInlineFormulaSelectionInteractions(input: {
     pointerState.previewRowIndex = target.rowIndex
     pointerState.previewColumnKey = target.columnKey
     pointerState.previewColumnLabel = input.resolveColumnLabel(target.columnKey)
-    applyInlineFormulaReference(reference, pointerState)
+    applyInlineFormulaReference(reference, pointerState, activeFormulaCell.rowIndex)
   }
 
   function resolveDraggableInlineFormulaReference(rowId: string, columnKey: string) {
@@ -458,17 +578,20 @@ export function useInlineFormulaSelectionInteractions(input: {
       target.rowIndex,
       activeFormulaCell.rowIndex,
     )
-    const nextExpression = `${pointerState.baseExpression.slice(0, pointerState.replaceStart)}${reference}${pointerState.baseExpression.slice(pointerState.replaceEnd)}`
 
     pointerState.previewRowId = target.rowId
     pointerState.previewRowIndex = target.rowIndex
     pointerState.previewColumnKey = target.columnKey
     pointerState.previewColumnLabel = input.resolveColumnLabel(target.columnKey)
-    const nextState = input.coerceFormulaEditorState(
-      `${pointerState.expressionPrefix}${nextExpression}`,
-      input.inlineFormulaSelection.value.start,
-      input.inlineFormulaSelection.value.end,
-    )
+    const nextState = applyInlineFormulaReferenceEdit({
+      baseExpression: pointerState.baseExpression,
+      expressionPrefix: pointerState.expressionPrefix,
+      replaceStart: pointerState.replaceStart,
+      replaceEnd: pointerState.replaceEnd,
+      reference,
+      currentRowIndex: activeFormulaCell.rowIndex,
+      selectionMode: 'preserve-current',
+    })
     input.inlineFormulaValue.value = nextState.value
     input.setInlineFormulaSelection({
       start: nextState.selectionStart,

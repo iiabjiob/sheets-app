@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { createDataGridSpreadsheetFormulaReferenceDecorations } from '@affino/datagrid-core'
 import {
   defineDataGridComponent,
   defineDataGridFilterCellReader,
@@ -15,9 +16,9 @@ import {
   type DataGridRowIndexMenuProp,
 } from '@affino/datagrid-vue-app'
 
-import AppDialog from '@/components/AppDialog.vue'
 import CellHistoryDialog from '@/components/CellHistoryDialog.vue'
 import InlineFormulaPane from '@/components/formulas/InlineFormulaPane.vue'
+import RenameColumnDialog from '@/components/RenameColumnDialog.vue'
 import {
   type FormulaReferencePointerState,
   type GridFocusRestoreTarget,
@@ -57,21 +58,36 @@ import type {
 import {
   buildSpreadsheetFormulaCellKey,
   buildSpreadsheetFormulaCellResults,
+  doesSpreadsheetFormulaSheetMatchReference,
   isSpreadsheetFormulaValue,
   normalizeSpreadsheetFormulaExpression,
   rebaseSpreadsheetFormulaRowsAfterReorder,
+  rewriteSpreadsheetFormulasForColumnReferenceNameRename,
   rewriteSpreadsheetFormulasForColumnKeyRename,
   rewriteSpreadsheetFormulasForRowInsert,
   type SpreadsheetFormulaCellResult,
   type SpreadsheetFormulaReferenceTarget,
   type SpreadsheetFormulaWorkbookSheet,
 } from '@/utils/spreadsheetFormula'
+import {
+  mutateSpreadsheetSheetColumns,
+  resolveGridColumnFormulaReferenceName,
+  validateSpreadsheetColumnFormulaAlias,
+} from '@/utils/spreadsheetColumnModel'
+import {
+  GRID_COLUMN_TYPE_OPTIONS,
+  normalizeGridColumnTypeValue,
+  resolveGridColumnDataTypeForColumnType,
+} from '@/utils/gridColumnTypes'
+import {
+  normalizeSpreadsheetWorkbookFormulaSheets,
+  type SpreadsheetWorkbookFormulaSheet,
+} from '@/utils/spreadsheetWorkbookModel'
 
 type GridRow = Record<string, unknown>
 type GridPasteOptions = {
   mode?: 'default' | 'values'
 }
-type RenameColumnMode = 'title' | 'key'
 
 interface GridSourceRowNode {
   rowId: string | number
@@ -316,8 +332,8 @@ const gridRenderVersion = ref(0)
 const preserveCommittedHashOnNextGridReady = ref(false)
 const renameColumnDialogOpen = ref(false)
 const renameColumnTargetKey = ref<string | null>(null)
-const renameColumnMode = ref<RenameColumnMode | null>(null)
 const renameColumnInitialValue = ref('')
+const renameColumnInitialType = ref<GridColumnType>('text')
 const gridSelectionSnapshot = ref<GridSelectionSnapshotLike | null>(null)
 const gridSelectionAggregatesLabel = ref('')
 const gridSelectionInteractionSource = ref<GridSelectionInteractionSource>('programmatic')
@@ -349,13 +365,41 @@ const lastStableFormulaCellResults = ref<Map<string, SpreadsheetFormulaCellResul
 const pendingGridFocusRestoreTarget = ref<GridFocusRestoreTarget | null>(null)
 const pendingGridSelectionRestoreSnapshot = ref<GridRuntimeSelectionSnapshotLike | null>(null)
 const gridFocusRestoreFrame = ref<number | null>(null)
+const indexPaneCanvasRef = ref<HTMLCanvasElement | null>(null)
+const formulaReferenceCanvasRef = ref<HTMLCanvasElement | null>(null)
+
+type FormulaReferenceCanvasOverlay = {
+  id: string
+  top: number
+  left: number
+  width: number
+  height: number
+  toneIndex: number
+  isActive: boolean
+}
+
 let formulaHighlightObserver: MutationObserver | null = null
 let formulaHighlightRefreshFrame: number | null = null
+let formulaHighlightViewportListenersCleanup: (() => void) | null = null
+let indexPaneCanvasObserver: MutationObserver | null = null
+let indexPaneCanvasResizeObserver: ResizeObserver | null = null
+let indexPaneCanvasRefreshFrame: number | null = null
+let indexPaneCanvasViewportListenersCleanup: (() => void) | null = null
+let gridCanvasColorProbe: HTMLDivElement | null = null
+
+type IndexPaneSelectionVariant = 'single' | 'top' | 'middle' | 'bottom'
 
 function clearFormulaHighlightRefreshFrame() {
   if (formulaHighlightRefreshFrame !== null) {
     window.cancelAnimationFrame(formulaHighlightRefreshFrame)
     formulaHighlightRefreshFrame = null
+  }
+}
+
+function clearIndexPaneCanvasRefreshFrame() {
+  if (indexPaneCanvasRefreshFrame !== null) {
+    window.cancelAnimationFrame(indexPaneCanvasRefreshFrame)
+    indexPaneCanvasRefreshFrame = null
   }
 }
 
@@ -366,6 +410,574 @@ function scheduleFormulaHighlightRefresh() {
     applyFormulaReferenceHighlights()
     ensureFormulaHighlightObserver()
   })
+}
+
+function disconnectIndexPaneCanvasViewportListeners() {
+  indexPaneCanvasViewportListenersCleanup?.()
+  indexPaneCanvasViewportListenersCleanup = null
+}
+
+function disconnectIndexPaneCanvasResizeObserver() {
+  indexPaneCanvasResizeObserver?.disconnect()
+  indexPaneCanvasResizeObserver = null
+}
+
+function disconnectIndexPaneCanvasObserver() {
+  indexPaneCanvasObserver?.disconnect()
+  indexPaneCanvasObserver = null
+}
+
+function disposeGridCanvasColorProbe() {
+  gridCanvasColorProbe?.remove()
+  gridCanvasColorProbe = null
+}
+
+function ensureGridCanvasColorProbe(host: HTMLElement) {
+  if (gridCanvasColorProbe?.parentElement !== host) {
+    disposeGridCanvasColorProbe()
+    gridCanvasColorProbe = document.createElement('div')
+    gridCanvasColorProbe.setAttribute('aria-hidden', 'true')
+    gridCanvasColorProbe.style.position = 'absolute'
+    gridCanvasColorProbe.style.inset = '0'
+    gridCanvasColorProbe.style.width = '0'
+    gridCanvasColorProbe.style.height = '0'
+    gridCanvasColorProbe.style.opacity = '0'
+    gridCanvasColorProbe.style.visibility = 'hidden'
+    gridCanvasColorProbe.style.pointerEvents = 'none'
+    host.appendChild(gridCanvasColorProbe)
+  }
+
+  return gridCanvasColorProbe
+}
+
+function resolveGridCanvasColor(
+  host: HTMLElement,
+  value: string,
+  fallback: string,
+  property: 'background' | 'borderColor' = 'background',
+) {
+  const trimmedValue = value.trim()
+  if (!trimmedValue) {
+    return fallback
+  }
+
+  const probe = ensureGridCanvasColorProbe(host)
+  probe.style.background = ''
+  probe.style.borderColor = ''
+  probe.style.borderTopWidth = '0'
+  probe.style.borderTopStyle = 'solid'
+
+  if (property === 'borderColor') {
+    probe.style.borderColor = trimmedValue
+    probe.style.borderTopWidth = '1px'
+    const resolvedBorderColor = getComputedStyle(probe).borderTopColor
+    probe.style.borderColor = ''
+    probe.style.borderTopWidth = '0'
+    return resolvedBorderColor || fallback
+  }
+
+  probe.style.background = trimmedValue
+  const resolvedBackgroundColor = getComputedStyle(probe).backgroundColor
+  probe.style.background = ''
+  return resolvedBackgroundColor || fallback
+}
+
+function resolveIndexPaneSelectionVariant(cell: HTMLElement): IndexPaneSelectionVariant {
+  if (cell.classList.contains('grid-cell--index-selected-single')) {
+    return 'single'
+  }
+
+  if (cell.classList.contains('grid-cell--index-selected-top')) {
+    return 'top'
+  }
+
+  if (cell.classList.contains('grid-cell--index-selected-bottom')) {
+    return 'bottom'
+  }
+
+  return 'middle'
+}
+
+function traceIndexPaneSelectionPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  variant: IndexPaneSelectionVariant,
+) {
+  context.beginPath()
+
+  if (variant === 'middle' || radius <= 0) {
+    context.rect(x, y, width, height)
+    return
+  }
+
+  if (variant === 'single') {
+    if (typeof context.roundRect === 'function') {
+      context.roundRect(x, y, width, height, radius)
+      return
+    }
+
+    context.rect(x, y, width, height)
+    return
+  }
+
+  if (variant === 'top') {
+    context.moveTo(x, y + height)
+    context.lineTo(x, y + radius)
+    context.quadraticCurveTo(x, y, x + radius, y)
+    context.lineTo(x + width - radius, y)
+    context.quadraticCurveTo(x + width, y, x + width, y + radius)
+    context.lineTo(x + width, y + height)
+    context.closePath()
+    return
+  }
+
+  context.moveTo(x, y)
+  context.lineTo(x, y + height - radius)
+  context.quadraticCurveTo(x, y + height, x + radius, y + height)
+  context.lineTo(x + width - radius, y + height)
+  context.quadraticCurveTo(x + width, y + height, x + width, y + height - radius)
+  context.lineTo(x + width, y)
+  context.closePath()
+}
+
+function clearFormulaReferenceCanvas() {
+  const canvas = formulaReferenceCanvasRef.value
+  const context = canvas?.getContext('2d')
+  if (!canvas || !context) {
+    return
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height)
+}
+
+function drawFormulaReferenceCanvas(overlays: readonly FormulaReferenceCanvasOverlay[]) {
+  const root = gridRootRef.value
+  const canvas = formulaReferenceCanvasRef.value
+  if (!root || !canvas) {
+    return
+  }
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return
+  }
+
+  const rootRect = root.getBoundingClientRect()
+  const width = Math.round(rootRect.width)
+  const height = Math.round(rootRect.height)
+
+  if (width <= 0 || height <= 0) {
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    return
+  }
+
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
+  const scaledWidth = Math.round(width * devicePixelRatio)
+  const scaledHeight = Math.round(height * devicePixelRatio)
+
+  if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
+    canvas.width = scaledWidth
+    canvas.height = scaledHeight
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+  }
+
+  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
+  context.clearRect(0, 0, width, height)
+
+  if (!overlays.length) {
+    return
+  }
+
+  const stage =
+    root.querySelector<HTMLElement>('.affino-datagrid-app-root') ??
+    root.querySelector<HTMLElement>('.grid-stage')
+  if (!stage) {
+    return
+  }
+
+  const leftPinnedBoundary = Array.from(
+    root.querySelectorAll<HTMLElement>('.grid-header-pane--left, .grid-body-pane--left'),
+  ).reduce((maxRight, pane) => {
+    const paneRect = pane.getBoundingClientRect()
+    return Math.max(maxRight, paneRect.right - rootRect.left)
+  }, 0)
+
+  if (leftPinnedBoundary > 0 && leftPinnedBoundary < width) {
+    context.save()
+    context.beginPath()
+    context.rect(leftPinnedBoundary, 0, width - leftPinnedBoundary, height)
+    context.clip()
+  }
+
+  for (const overlay of overlays) {
+    const toneColor = resolveGridCanvasColor(
+      stage,
+      `var(--formula-tone-${overlay.toneIndex})`,
+      'rgba(47, 127, 104, 1)',
+      'borderColor',
+    )
+    const activeGlowColor = resolveGridCanvasColor(
+      stage,
+      `color-mix(in srgb, var(--formula-tone-${overlay.toneIndex}) 18%, transparent)`,
+      toneColor,
+    )
+    const strokeX = overlay.left + 0.5
+    const strokeY = overlay.top + 0.5
+    const strokeWidth = Math.max(0, overlay.width - 1)
+    const strokeHeight = Math.max(0, overlay.height - 1)
+
+    if (strokeWidth <= 0 || strokeHeight <= 0) {
+      continue
+    }
+
+    context.save()
+    context.setLineDash([6, 4])
+    context.strokeStyle = toneColor
+    context.lineWidth = 1
+    context.strokeRect(strokeX, strokeY, strokeWidth, strokeHeight)
+
+    if (overlay.isActive) {
+      context.setLineDash([])
+      context.strokeStyle = activeGlowColor
+      context.lineWidth = 1
+      context.strokeRect(strokeX - 1, strokeY - 1, strokeWidth + 2, strokeHeight + 2)
+    }
+
+    context.restore()
+  }
+
+  if (leftPinnedBoundary > 0 && leftPinnedBoundary < width) {
+    context.restore()
+  }
+}
+
+function scheduleIndexPaneCanvasRefresh() {
+  clearIndexPaneCanvasRefreshFrame()
+  indexPaneCanvasRefreshFrame = window.requestAnimationFrame(() => {
+    indexPaneCanvasRefreshFrame = null
+    drawIndexPaneCanvas()
+    ensureIndexPaneCanvasObserver()
+  })
+}
+
+function ensureIndexPaneCanvasViewportListeners() {
+  disconnectIndexPaneCanvasViewportListeners()
+
+  const root = gridRootRef.value
+  if (!root || typeof window === 'undefined') {
+    return
+  }
+
+  const viewports = root.querySelectorAll<HTMLElement>('.grid-body-viewport, .grid-header-viewport')
+  const handleViewportScroll = () => {
+    scheduleIndexPaneCanvasRefresh()
+  }
+
+  viewports.forEach((viewport) => {
+    viewport.addEventListener('scroll', handleViewportScroll, { passive: true })
+  })
+  window.addEventListener('resize', handleViewportScroll, { passive: true })
+
+  indexPaneCanvasViewportListenersCleanup = () => {
+    viewports.forEach((viewport) => {
+      viewport.removeEventListener('scroll', handleViewportScroll)
+    })
+    window.removeEventListener('resize', handleViewportScroll)
+  }
+}
+
+function ensureIndexPaneCanvasResizeObserver() {
+  disconnectIndexPaneCanvasResizeObserver()
+
+  const root = gridRootRef.value
+  if (!root || typeof ResizeObserver === 'undefined') {
+    return
+  }
+
+  indexPaneCanvasResizeObserver = new ResizeObserver(() => {
+    scheduleIndexPaneCanvasRefresh()
+  })
+  indexPaneCanvasResizeObserver.observe(root)
+}
+
+function ensureIndexPaneCanvasObserver() {
+  disconnectIndexPaneCanvasObserver()
+
+  const root = gridRootRef.value
+  if (!root) {
+    return
+  }
+
+  indexPaneCanvasObserver = new MutationObserver(() => {
+    scheduleIndexPaneCanvasRefresh()
+  })
+  indexPaneCanvasObserver.observe(root, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['class', 'style'],
+  })
+}
+
+function drawIndexPaneCanvas() {
+  const root = gridRootRef.value
+  const canvas = indexPaneCanvasRef.value
+  if (!root || !canvas) {
+    return
+  }
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return
+  }
+
+  const rootRect = root.getBoundingClientRect()
+  const width = Math.round(rootRect.width)
+  const height = Math.round(rootRect.height)
+
+  if (width <= 0 || height <= 0) {
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    return
+  }
+
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
+  const scaledWidth = Math.round(width * devicePixelRatio)
+  const scaledHeight = Math.round(height * devicePixelRatio)
+
+  if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
+    canvas.width = scaledWidth
+    canvas.height = scaledHeight
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+  }
+
+  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
+  context.clearRect(0, 0, width, height)
+
+  const stage =
+    root.querySelector<HTMLElement>('.affino-datagrid-app-root') ??
+    root.querySelector<HTMLElement>('.grid-stage')
+  if (!stage) {
+    return
+  }
+
+  const stageStyle = getComputedStyle(stage)
+  const rowDividerSize = Math.max(0, Number.parseFloat(stageStyle.getPropertyValue('--datagrid-row-divider-size')) || 0)
+  const columnDividerSize = Math.max(
+    0,
+    Number.parseFloat(stageStyle.getPropertyValue('--datagrid-column-divider-size')) || 0,
+  )
+  const indexBackgroundColor = resolveGridCanvasColor(
+    stage,
+    'var(--datagrid-index-cell-background-color)',
+    'rgba(238, 241, 238, 1)',
+  )
+  const rowSelectedBackgroundColor = resolveGridCanvasColor(
+    stage,
+    'var(--datagrid-row-selected-background-color)',
+    'rgba(0, 0, 0, 0)',
+  )
+  const rowHoverBackgroundColor = resolveGridCanvasColor(
+    stage,
+    'var(--datagrid-row-band-hover-bg)',
+    'rgba(0, 0, 0, 0)',
+  )
+  const rowStripedBackgroundColor = resolveGridCanvasColor(
+    stage,
+    'var(--datagrid-row-band-striped-bg)',
+    'rgba(0, 0, 0, 0)',
+  )
+  const rowDividerColor = resolveGridCanvasColor(
+    stage,
+    'var(--datagrid-row-divider-color)',
+    'rgba(188, 196, 191, 1)',
+  )
+  const selectionFillColor = resolveGridCanvasColor(
+    stage,
+    'var(--sheet-grid-index-selection-fill, var(--datagrid-selection-range-bg))',
+    'rgba(31, 143, 82, 0.06)',
+  )
+  const selectionStrokeColor = resolveGridCanvasColor(
+    stage,
+    'var(--sheet-grid-index-selection-stroke, var(--datagrid-selection-border-color))',
+    'rgba(31, 143, 82, 1)',
+    'borderColor',
+  )
+
+  const leftHeaderPanes = root.querySelectorAll<HTMLElement>('.grid-header-pane--left')
+  const leftBodyPanes = root.querySelectorAll<HTMLElement>('.grid-body-pane--left')
+
+  const resolveRelativeRect = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect()
+    return {
+      top: rect.top - rootRect.top,
+      left: rect.left - rootRect.left,
+      width: rect.width,
+      height: rect.height,
+      bottom: rect.bottom - rootRect.top,
+    }
+  }
+
+  leftHeaderPanes.forEach((pane) => {
+    const paneRect = resolveRelativeRect(pane)
+    if (paneRect.width <= 0 || paneRect.height <= 0) {
+      return
+    }
+
+    context.fillStyle = indexBackgroundColor
+    context.fillRect(paneRect.left, paneRect.top, paneRect.width, paneRect.height)
+  })
+
+  leftBodyPanes.forEach((pane) => {
+    const paneRect = resolveRelativeRect(pane)
+    if (paneRect.width <= 0 || paneRect.height <= 0) {
+      return
+    }
+
+    context.fillStyle = indexBackgroundColor
+    context.fillRect(paneRect.left, paneRect.top, paneRect.width, paneRect.height)
+
+    pane.querySelectorAll<HTMLElement>('.grid-cell--index').forEach((cell) => {
+      const cellRect = resolveRelativeRect(cell)
+      if (cellRect.width <= 0 || cellRect.height <= 0) {
+        return
+      }
+
+      const rowElement = cell.closest<HTMLElement>('.grid-row')
+      let bandColor = ''
+
+      if (
+        rowElement?.classList.contains('grid-row--checkbox-selected') ||
+        rowElement?.classList.contains('grid-row--focused')
+      ) {
+        bandColor = rowSelectedBackgroundColor
+      } else if (
+        rowElement?.classList.contains('grid-row--hoverable') &&
+        rowElement.classList.contains('grid-row--hovered')
+      ) {
+        bandColor = rowHoverBackgroundColor
+      } else if (rowElement?.classList.contains('grid-row--striped')) {
+        bandColor = rowStripedBackgroundColor
+      }
+
+      if (bandColor && bandColor !== 'rgba(0, 0, 0, 0)') {
+        context.fillStyle = bandColor
+        context.fillRect(
+          cellRect.left,
+          cellRect.top,
+          Math.max(0, cellRect.width - columnDividerSize),
+          Math.max(0, cellRect.height - rowDividerSize),
+        )
+      }
+
+      if (rowDividerSize > 0) {
+        context.fillStyle = rowDividerColor
+        context.fillRect(
+          cellRect.left,
+          cellRect.bottom - rowDividerSize,
+          cellRect.width,
+          rowDividerSize,
+        )
+      }
+    })
+  })
+
+  const sheetStage = root.closest<HTMLElement>('.sheet-grid-stage')
+  const shouldHideSelectionOverlay =
+    sheetStage?.classList.contains('sheet-grid-stage--formula-editor-open') ||
+    sheetStage?.classList.contains('sheet-grid-stage--formula-reference-mode')
+
+  if (shouldHideSelectionOverlay) {
+    return
+  }
+
+  root
+    .querySelectorAll<HTMLElement>('.grid-body-pane--left .datagrid-stage__row-index-cell.grid-cell--index-selected')
+    .forEach((cell) => {
+      const cellRect = resolveRelativeRect(cell)
+      if (cellRect.width <= 0 || cellRect.height <= 0) {
+        return
+      }
+
+      const variant = resolveIndexPaneSelectionVariant(cell)
+      const topInset = variant === 'single' || variant === 'top' ? 2 : -rowDividerSize
+      const bottomInset = variant === 'single' || variant === 'bottom' ? 2 : -rowDividerSize
+      const x = cellRect.left + 6
+      const y = cellRect.top + topInset
+      const selectionWidth = cellRect.width - (12 + columnDividerSize)
+      const selectionHeight = cellRect.height - topInset - bottomInset
+
+      if (selectionWidth <= 0 || selectionHeight <= 0) {
+        return
+      }
+
+      context.fillStyle = selectionFillColor
+      traceIndexPaneSelectionPath(context, x, y, selectionWidth, selectionHeight, 10, variant)
+      context.fill()
+
+      context.strokeStyle = selectionStrokeColor
+      context.lineWidth = 1
+      traceIndexPaneSelectionPath(
+        context,
+        x + 0.5,
+        y + 0.5,
+        Math.max(0, selectionWidth - 1),
+        Math.max(0, selectionHeight - 1),
+        10,
+        variant,
+      )
+      context.stroke()
+
+      if (variant === 'top' || variant === 'bottom') {
+        context.strokeStyle = selectionFillColor
+        context.lineWidth = 2
+        context.beginPath()
+        if (variant === 'top') {
+          context.moveTo(x, y + selectionHeight - 0.5)
+          context.lineTo(x + selectionWidth, y + selectionHeight - 0.5)
+        } else {
+          context.moveTo(x, y + 0.5)
+          context.lineTo(x + selectionWidth, y + 0.5)
+        }
+        context.stroke()
+      }
+    })
+}
+
+function disconnectFormulaHighlightViewportListeners() {
+  formulaHighlightViewportListenersCleanup?.()
+  formulaHighlightViewportListenersCleanup = null
+}
+
+function ensureFormulaHighlightViewportListeners() {
+  disconnectFormulaHighlightViewportListeners()
+
+  const root = gridRootRef.value
+  if (!root || !inlineFormulaCell.value || typeof window === 'undefined') {
+    return
+  }
+
+  const viewports = root.querySelectorAll<HTMLElement>('.grid-body-viewport, .grid-header-viewport')
+  const handleViewportScroll = () => {
+    scheduleFormulaHighlightRefresh()
+  }
+
+  viewports.forEach((viewport) => {
+    viewport.addEventListener('scroll', handleViewportScroll, { passive: true })
+  })
+  window.addEventListener('resize', handleViewportScroll, { passive: true })
+
+  formulaHighlightViewportListenersCleanup = () => {
+    viewports.forEach((viewport) => {
+      viewport.removeEventListener('scroll', handleViewportScroll)
+    })
+    window.removeEventListener('resize', handleViewportScroll)
+  }
 }
 
 function setInlineFormulaPanelRef(element: HTMLElement | null) {
@@ -415,15 +1027,40 @@ function extendRowsWithFormulaPlaceholders(rows: GridRow[]): GridRow[] {
 }
 
 const gridRows = computed<GridRow[]>(() => inputRows.value)
-const formulaSourceColumns = computed(() =>
-  runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value,
-)
+const activeFormulaSourceSheet = computed(() => {
+  if (!props.sheetId) {
+    return null
+  }
+
+  return props.workbookSheets.find((sheet) => sheet.id === props.sheetId) ?? null
+})
+const formulaSourceColumns = computed(() => {
+  if (runtimeColumns.value.length) {
+    return runtimeColumns.value
+  }
+
+  if (inputColumns.value.length) {
+    return inputColumns.value
+  }
+
+  if (props.sheet?.id === props.sheetId && props.sheet.columns.length) {
+    return props.sheet.columns
+  }
+
+  return activeFormulaSourceSheet.value?.columns ?? []
+})
 const formulaSourceRows = computed<GridRow[]>(() => {
-  const sourceRows = runtimeRows.value.length ? runtimeRows.value : inputRows.value
+  const sourceRows = runtimeRows.value.length
+    ? runtimeRows.value
+    : inputRows.value.length
+      ? inputRows.value
+      : props.sheet?.id === props.sheetId
+        ? props.sheet.rows
+        : activeFormulaSourceSheet.value?.rows ?? []
   return inlineFormulaCell.value ? extendRowsWithFormulaPlaceholders(sourceRows) : sourceRows
 })
 const formulaWorkbookSheets = computed<SpreadsheetFormulaWorkbookSheet[]>(() => {
-  const sheets = props.workbookSheets.map((sheet) =>
+  const nextSheets = props.workbookSheets.map<SpreadsheetWorkbookFormulaSheet>((sheet) =>
     sheet.id === props.sheetId
       ? {
           ...sheet,
@@ -433,11 +1070,11 @@ const formulaWorkbookSheets = computed<SpreadsheetFormulaWorkbookSheet[]>(() => 
       : sheet,
   )
 
-  if (!props.sheetId || sheets.some((sheet) => sheet.id === props.sheetId)) {
-    return sheets
+  if (!props.sheetId || nextSheets.some((sheet) => sheet.id === props.sheetId)) {
+    return normalizeSpreadsheetWorkbookFormulaSheets(nextSheets, props.sheetId)
   }
 
-  return [
+  return normalizeSpreadsheetWorkbookFormulaSheets([
     {
       id: props.sheetId,
       key: props.sheet?.key ?? props.sheetId,
@@ -446,8 +1083,8 @@ const formulaWorkbookSheets = computed<SpreadsheetFormulaWorkbookSheet[]>(() => 
       columns: formulaSourceColumns.value,
       rows: formulaSourceRows.value,
     },
-    ...sheets,
-  ]
+    ...nextSheets,
+  ], props.sheetId)
 })
 const formulaBuildOptions = computed(() => ({
   currentSheetId: props.sheetId,
@@ -455,6 +1092,119 @@ const formulaBuildOptions = computed(() => ({
   currentSheetName: props.sheet?.name ?? props.sheetName,
   workbookSheets: formulaWorkbookSheets.value,
 }))
+const currentFormulaWorkbookSheet = computed(
+  () => formulaWorkbookSheets.value.find((sheet) => sheet.id === props.sheetId) ?? null,
+)
+
+const renameColumnDialogValidator = computed<((value: string) => string | null) | null>(
+  () => validateSpreadsheetColumnFormulaAlias,
+)
+
+const currentSheetFormulaReferenceRanges = computed(() => {
+  const currentSheet = currentFormulaWorkbookSheet.value
+  if (!currentSheet || !inlineFormulaReferenceSpans.value.length) {
+    return []
+  }
+
+  const decorations = createDataGridSpreadsheetFormulaReferenceDecorations(
+    inlineFormulaReferenceSpans.value,
+    {
+      activeSheetId: currentSheet.id,
+      requireActiveSheet: false,
+      resolveSheet: (reference) => {
+        if (!reference.sheetReference) {
+          return {
+            id: currentSheet.id,
+            columns: currentSheet.columns.map((column) => ({
+              key: column.key,
+              formulaAlias: resolveGridColumnFormulaReferenceName(column),
+            })),
+          }
+        }
+
+        const matchedSheet = formulaWorkbookSheets.value.find((sheet) => {
+          if (!reference.sheetReference) {
+            return false
+          }
+
+          return doesSpreadsheetFormulaSheetMatchReference(sheet, reference.sheetReference)
+        })
+
+        if (!matchedSheet) {
+          return null
+        }
+
+        return {
+          id: matchedSheet.id,
+          columns: matchedSheet.columns.map((column) => ({
+            key: column.key,
+            formulaAlias: resolveGridColumnFormulaReferenceName(column),
+          })),
+        }
+      },
+    },
+  )
+
+  return decorations.filter((decoration) => decoration.referencedSheetId === currentSheet.id)
+})
+
+const currentSheetFormulaReferenceDecorations = computed(() => {
+  const currentSheet = currentFormulaWorkbookSheet.value
+  if (!currentSheet) {
+    return []
+  }
+
+  return currentSheetFormulaReferenceRanges.value.flatMap((decoration) => {
+      const isSingleCell =
+        decoration.startRowIndex === decoration.endRowIndex &&
+        decoration.startColumnIndex === decoration.endColumnIndex
+      const nextTargets: Array<{
+        rowId: string
+        rowIndex: number
+        columnKey: string
+        toneIndex: number
+        isDraggable: boolean
+      }> = []
+
+      for (let rowIndex = decoration.startRowIndex; rowIndex <= decoration.endRowIndex; rowIndex += 1) {
+        const row = currentSheet.rows[rowIndex]
+        if (!row) {
+          continue
+        }
+
+        const rowId = String(row.id ?? rowIndex)
+        for (
+          let columnIndex = decoration.startColumnIndex;
+          columnIndex <= decoration.endColumnIndex;
+          columnIndex += 1
+        ) {
+          const column = currentSheet.columns[columnIndex]
+          if (!column) {
+            continue
+          }
+
+          nextTargets.push({
+            rowId,
+            rowIndex,
+            columnKey: column.key,
+            toneIndex: decoration.colorIndex,
+            isDraggable: isSingleCell,
+          })
+        }
+      }
+
+      return nextTargets
+    })
+})
+
+function rebaseFormulaRowsAfterReorder(previousRows: GridRow[], nextRows: GridRow[]) {
+  return rebaseSpreadsheetFormulaRowsAfterReorder(
+    previousRows,
+    nextRows,
+    formulaBuildOptions.value,
+  )
+}
+
 const {
   formulaPreviewTooltipState,
   formulaPreviewTeleportTarget,
@@ -468,7 +1218,7 @@ const {
 } = useFormulaPreviewTooltip({
   resolveGridCellElement: ({ rowId, columnKey }) =>
     resolveGridCellElement({ rowId, columnKey }),
-  resolveColumnLabel,
+  resolveColumnLabel: resolveColumnFormulaReferenceLabel,
 })
 const {
   cellHistoryDialogOpen,
@@ -567,7 +1317,7 @@ const {
   resolveGridCellElement,
   resolveVisibleColumnKey,
   resolveVisibleColumnIndex,
-  resolveColumnLabel,
+  resolveColumnLabel: resolveColumnFormulaReferenceLabel,
   resolveRawCellFormulaValue,
   captureGridHistorySnapshot,
   clearInlineFormulaSelectionReference: () => {
@@ -733,19 +1483,11 @@ const columnMenu = computed<Exclude<DataGridColumnMenuProp, boolean | null>>(() 
       placement: 'start',
       items: [
         {
-          key: 'rename-column-title',
-          label: 'Display title',
+          key: 'rename-column-name',
+          label: 'Rename column',
           onSelect: ({ columnKey, columnLabel, closeMenu }) => {
             closeMenu()
-            openRenameColumnDialog(columnKey, 'title', columnLabel)
-          },
-        },
-        {
-          key: 'rename-column-key',
-          label: 'Reference key',
-          onSelect: ({ columnKey, closeMenu }) => {
-            closeMenu()
-            openRenameColumnDialog(columnKey, 'key', columnKey)
+            openRenameColumnDialog(columnKey, columnLabel)
           },
         },
         {
@@ -781,6 +1523,7 @@ const columnMenu = computed<Exclude<DataGridColumnMenuProp, boolean | null>>(() 
 const {
   inlineFormulaAnalysis,
   inlineFormulaReferenceOccurrences,
+  inlineFormulaReferenceSpans,
   inlineFormulaReferenceTargets,
   inlineFormulaNormalizedExpression,
   inlineFormulaHasDraftChanges,
@@ -818,6 +1561,7 @@ const {
   inlineFormulaValue,
   inlineFormulaSelection,
   inlineFormulaLastSelectionTarget,
+  inlineFormulaReferenceSpans,
   inlineFormulaReferenceOccurrences,
   inlineFormulaSelectionReferenceState,
   inlineFormulaReferenceInsertAnchorState,
@@ -826,7 +1570,7 @@ const {
   setInlineFormulaSelection,
   resolveVisibleColumnIndex,
   resolveVisibleColumnKey,
-  resolveColumnLabel,
+  resolveColumnLabel: resolveColumnFormulaReferenceLabel,
 })
 const {
   syncInlineFormulaState,
@@ -902,7 +1646,7 @@ const {
   serializeGridPayload,
   scheduleDraftChange,
   scheduleFormulaCellRefresh,
-  rebaseRowsAfterReorder: rebaseSpreadsheetFormulaRowsAfterReorder,
+  rebaseRowsAfterReorder: rebaseFormulaRowsAfterReorder,
   isEditableRowModel,
   gridRootRef,
 })
@@ -978,8 +1722,14 @@ watch(
     inlineFormulaCell.value?.rowId ?? null,
     inlineFormulaCell.value?.columnKey ?? null,
     inlineFormulaValue.value,
-    inlineFormulaReferenceTargets.value
-      .map((target) => `${target.rowId}:${target.columnKey}:${target.toneIndex}`)
+    currentSheetFormulaReferenceRanges.value
+      .map(
+        (decoration) =>
+          `${decoration.referencedSheetId}:${decoration.startRowIndex}:${decoration.endRowIndex}:${decoration.startColumnIndex}:${decoration.endColumnIndex}:${decoration.colorIndex}`,
+      )
+      .join('|'),
+    currentSheetFormulaReferenceDecorations.value
+      .map((target) => `${target.rowId}:${target.rowIndex}:${target.columnKey}:${target.toneIndex}`)
       .join('|'),
     inlineFormulaLastSelectionTarget.value
       ? `${inlineFormulaLastSelectionTarget.value.rowId}:${inlineFormulaLastSelectionTarget.value.columnKey}`
@@ -1015,6 +1765,10 @@ watch(
     void nextTick(() => {
       refreshFormulaCells()
       syncGridEditorState()
+      scheduleIndexPaneCanvasRefresh()
+      ensureIndexPaneCanvasViewportListeners()
+      ensureIndexPaneCanvasResizeObserver()
+      ensureIndexPaneCanvasObserver()
     })
 
     if (!inlineFormulaCell.value) {
@@ -1024,6 +1778,15 @@ watch(
     void nextTick(() => {
       applyFormulaReferenceHighlights()
       ensureFormulaHighlightObserver()
+    })
+  },
+)
+
+watch(
+  () => [isInlineFormulaEditorOpen.value, isInlineFormulaReferenceMode.value],
+  () => {
+    void nextTick(() => {
+      scheduleIndexPaneCanvasRefresh()
     })
   },
 )
@@ -1042,6 +1805,12 @@ onBeforeUnmount(() => {
   }
 
   window.removeEventListener('keydown', handleWindowHistoryKeydown, true)
+  clearIndexPaneCanvasRefreshFrame()
+  disconnectIndexPaneCanvasViewportListeners()
+  disconnectIndexPaneCanvasResizeObserver()
+  disconnectIndexPaneCanvasObserver()
+  disposeGridCanvasColorProbe()
+  disconnectFormulaHighlightViewportListeners()
   disposeFormulaPreviewTooltip()
 })
 
@@ -1181,7 +1950,7 @@ function handleGridMouseDownCapture(event: MouseEvent) {
 
   const draggableOccurrence = resolveDraggableInlineFormulaReference(cellTarget.rowId, cellTarget.columnKey)
   if (!draggableOccurrence) {
-    if (!beginInlineFormulaSelectionReference()) {
+    if (!beginInlineFormulaSelectionReference({ append: event.metaKey || event.ctrlKey })) {
       return
     }
     return
@@ -1210,7 +1979,7 @@ function handleGridMouseDownCapture(event: MouseEvent) {
     previewRowId: cellTarget.rowId,
     previewRowIndex: cellTarget.rowIndex,
     previewColumnKey: cellTarget.columnKey,
-    previewColumnLabel: resolveColumnLabel(cellTarget.columnKey),
+    previewColumnLabel: resolveColumnFormulaReferenceLabel(cellTarget.columnKey),
     baseValue: inlineFormulaValue.value,
     baseExpression,
     expressionPrefix,
@@ -1412,7 +2181,7 @@ function handleGridHeaderClickCapture(event: MouseEvent, target: GridHeaderTarge
   closeFormulaPreviewTooltip('pointer')
 
   if (inlineFormulaCell.value) {
-    beginInlineFormulaSelectionReference()
+    beginInlineFormulaSelectionReference({ append: event.metaKey || event.ctrlKey })
     clearInlineFormulaReferenceInsertAnchor()
     formulaReferencePointerState.value = null
   }
@@ -2036,13 +2805,10 @@ function upsertGridCellValue(
 }
 
 function materializeInlineFormulaReferenceRows(sourceRows: GridRow[]): GridRow[] {
-  const maxReferencedRowIndex = inlineFormulaReferenceTargets.value.reduce((maxIndex, target) => {
-    if (!target.isCurrentSheet) {
-      return maxIndex
-    }
-
-    return Math.max(maxIndex, target.rowIndex)
-  }, -1)
+  const maxReferencedRowIndex = currentSheetFormulaReferenceRanges.value.reduce(
+    (maxIndex, decoration) => Math.max(maxIndex, decoration.endRowIndex),
+    -1,
+  )
 
   if (maxReferencedRowIndex < sourceRows.length) {
     return sourceRows
@@ -2059,10 +2825,12 @@ function materializeInlineFormulaReferenceRows(sourceRows: GridRow[]): GridRow[]
 function applyFormulaReferenceHighlights() {
   const gridRoot = gridRootRef.value
   if (!gridRoot) {
+    clearFormulaReferenceCanvas()
     return
   }
 
   const root = gridRoot
+  const currentSheet = currentFormulaWorkbookSheet.value
 
   root
     .querySelectorAll<HTMLElement>(
@@ -2081,7 +2849,8 @@ function applyFormulaReferenceHighlights() {
       element.removeAttribute('data-formula-active')
     })
 
-  if (!inlineFormulaCell.value) {
+  if (!inlineFormulaCell.value || !currentSheet) {
+    clearFormulaReferenceCanvas()
     return
   }
 
@@ -2095,9 +2864,58 @@ function applyFormulaReferenceHighlights() {
   const activeFormulaSelectionColumnKey = inlineFormulaLastSelectionTarget.value?.columnKey ?? null
   const activeFormulaSelectionToneIndex = inlineFormulaLastSelectionTarget.value?.toneIndex ?? null
   const highlightedCurrentSheetTargets = new Set<string>()
+  const nextOverlays: FormulaReferenceCanvasOverlay[] = []
+  const rootRect = root.getBoundingClientRect()
 
   function buildCurrentSheetFormulaTargetKey(rowId: string, columnKey: string) {
     return `${rowId}::${columnKey}`
+  }
+
+  function pushFormulaReferenceOverlay(
+    id: string,
+    cells: readonly HTMLElement[],
+    toneIndex: number,
+    isActive: boolean,
+  ) {
+    if (!cells.length) {
+      return
+    }
+
+    let minTop = Number.POSITIVE_INFINITY
+    let minLeft = Number.POSITIVE_INFINITY
+    let maxRight = Number.NEGATIVE_INFINITY
+    let maxBottom = Number.NEGATIVE_INFINITY
+
+    for (const cell of cells) {
+      const rect = cell.getBoundingClientRect()
+      if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) {
+        continue
+      }
+
+      minTop = Math.min(minTop, rect.top - rootRect.top)
+      minLeft = Math.min(minLeft, rect.left - rootRect.left)
+      maxRight = Math.max(maxRight, rect.right - rootRect.left)
+      maxBottom = Math.max(maxBottom, rect.bottom - rootRect.top)
+    }
+
+    if (
+      !Number.isFinite(minTop) ||
+      !Number.isFinite(minLeft) ||
+      !Number.isFinite(maxRight) ||
+      !Number.isFinite(maxBottom)
+    ) {
+      return
+    }
+
+    nextOverlays.push({
+      id,
+      top: minTop,
+      left: minLeft,
+      width: Math.max(0, maxRight - minLeft),
+      height: Math.max(0, maxBottom - minTop),
+      toneIndex,
+      isActive,
+    })
   }
 
   function highlightCurrentSheetFormulaTarget(
@@ -2126,65 +2944,98 @@ function applyFormulaReferenceHighlights() {
       header.dataset.formulaTone = tone
       header.dataset.formulaActive = 'true'
     }
-  }
-
-  for (const target of inlineFormulaReferenceTargets.value) {
-    if (!target.isCurrentSheet) {
-      continue
-    }
-
-    highlightedCurrentSheetTargets.add(
-      buildCurrentSheetFormulaTargetKey(target.rowId, target.columnKey),
-    )
-
-    const cellSelector = `.grid-cell[data-row-id="${escapeCssSelector(target.rowId)}"][data-column-key="${escapeCssSelector(target.columnKey)}"]`
-    const headerSelector = `.grid-cell--header[data-column-key="${escapeCssSelector(target.columnKey)}"]`
-    const tone = String(target.toneIndex)
-    const cell = root.querySelector<HTMLElement>(cellSelector)
-    const header = root.querySelector<HTMLElement>(headerSelector)
-    const isDraggable = inlineFormulaReferenceOccurrences.value.some(
-      (occurrence) =>
-        occurrence.isCurrentSheet &&
-        occurrence.isSingleCell &&
-        occurrence.rowId === target.rowId &&
-        occurrence.columnKey === target.columnKey,
-    )
-    const isActiveDragTarget = Boolean(
-      dragReferenceState &&
-        dragReferenceState.previewRowId === target.rowId &&
-        dragReferenceState.previewColumnKey === target.columnKey,
-    )
-    const isActiveSelectionTarget = Boolean(
-      activeFormulaSelectionRowId &&
-        activeFormulaSelectionColumnKey &&
-        activeFormulaSelectionRowId === target.rowId &&
-        activeFormulaSelectionColumnKey === target.columnKey,
-    )
 
     if (cell) {
-      cell.classList.add('grid-cell--formula-reference')
-      cell.dataset.formulaTone = tone
-      if (isDraggable) {
-        cell.classList.add('grid-cell--formula-reference--draggable')
-        cell.dataset.formulaDraggable = 'true'
+      pushFormulaReferenceOverlay(
+        `formula-preview:${rowId}:${columnKey}:${tone}`,
+        [cell],
+        toneIndex,
+        true,
+      )
+    }
+  }
+
+  for (const decoration of currentSheetFormulaReferenceRanges.value) {
+    const tone = String(decoration.colorIndex)
+    const isDraggable =
+      decoration.startRowIndex === decoration.endRowIndex &&
+      decoration.startColumnIndex === decoration.endColumnIndex
+    const visibleCells: HTMLElement[] = []
+    let isActiveRange = false
+    const highlightedColumns = new Set<string>()
+
+    for (let rowIndex = decoration.startRowIndex; rowIndex <= decoration.endRowIndex; rowIndex += 1) {
+      const row = currentSheet.rows[rowIndex]
+      if (!row) {
+        continue
       }
-      if (isActiveDragTarget || isActiveSelectionTarget) {
+
+      const rowId = String(row.id ?? rowIndex)
+
+      for (
+        let columnIndex = decoration.startColumnIndex;
+        columnIndex <= decoration.endColumnIndex;
+        columnIndex += 1
+      ) {
+        const column = currentSheet.columns[columnIndex]
+        if (!column) {
+          continue
+        }
+
+        highlightedCurrentSheetTargets.add(buildCurrentSheetFormulaTargetKey(rowId, column.key))
+        highlightedColumns.add(column.key)
+
+        const cellSelector = `.grid-cell[data-row-id="${escapeCssSelector(rowId)}"][data-column-key="${escapeCssSelector(column.key)}"]`
+        const cell = root.querySelector<HTMLElement>(cellSelector)
+        if (cell) {
+          visibleCells.push(cell)
+          cell.classList.add('grid-cell--formula-reference')
+          cell.dataset.formulaTone = tone
+          if (isDraggable) {
+            cell.classList.add('grid-cell--formula-reference--draggable')
+            cell.dataset.formulaDraggable = 'true'
+          }
+        }
+
+        if (
+          (dragReferenceState?.previewRowId === rowId &&
+            dragReferenceState.previewColumnKey === column.key) ||
+          (activeFormulaSelectionRowId === rowId &&
+            activeFormulaSelectionColumnKey === column.key)
+        ) {
+          isActiveRange = true
+        }
+      }
+    }
+
+    for (const columnKey of highlightedColumns) {
+      const headerSelector = `.grid-cell--header[data-column-key="${escapeCssSelector(columnKey)}"]`
+      const header = root.querySelector<HTMLElement>(headerSelector)
+      if (!header) {
+        continue
+      }
+
+      header.classList.add('grid-cell--formula-reference-header')
+      header.dataset.formulaTone = tone
+      if (isActiveRange || activeFormulaSelectionColumnKey === columnKey) {
+        header.classList.add('grid-cell--formula-reference--active')
+        header.dataset.formulaActive = 'true'
+      }
+    }
+
+    if (isActiveRange) {
+      for (const cell of visibleCells) {
         cell.classList.add('grid-cell--formula-reference--active')
         cell.dataset.formulaActive = 'true'
       }
     }
 
-    if (header) {
-      header.classList.add('grid-cell--formula-reference-header')
-      header.dataset.formulaTone = tone
-      if (
-        isActiveDragTarget ||
-        (activeFormulaSelectionColumnKey && activeFormulaSelectionColumnKey === target.columnKey)
-      ) {
-        header.classList.add('grid-cell--formula-reference--active')
-        header.dataset.formulaActive = 'true'
-      }
-    }
+    pushFormulaReferenceOverlay(
+      `formula-range:${decoration.colorIndex}:${decoration.startRowIndex}:${decoration.endRowIndex}:${decoration.startColumnIndex}:${decoration.endColumnIndex}`,
+      visibleCells,
+      decoration.colorIndex,
+      isActiveRange,
+    )
   }
 
   if (
@@ -2221,10 +3072,13 @@ function applyFormulaReferenceHighlights() {
       activeFormulaSelectionToneIndex,
     )
   }
+
+  drawFormulaReferenceCanvas(nextOverlays)
 }
 
 function ensureFormulaHighlightObserver() {
   disconnectFormulaHighlightObserver()
+  ensureFormulaHighlightViewportListeners()
 
   if (!gridRootRef.value || !inlineFormulaCell.value) {
     return
@@ -2246,6 +3100,7 @@ function disconnectFormulaHighlightObserver() {
   clearFormulaHighlightRefreshFrame()
   formulaHighlightObserver?.disconnect()
   formulaHighlightObserver = null
+  disconnectFormulaHighlightViewportListeners()
 }
 
 function refreshFormulaCells() {
@@ -2339,6 +3194,7 @@ function createInsertedColumn(currentColumns: SheetGridColumn[]): SheetGridColum
   return {
     key: uniqueColumnKey(label, existingKeys),
     label,
+    formula_alias: label,
     data_type: 'text',
     column_type: 'text',
     width: 180,
@@ -2370,69 +3226,112 @@ function nextDefaultColumnLabel(columns: SheetGridColumn[]) {
 
 function clearRenameColumnDialogState() {
   renameColumnTargetKey.value = null
-  renameColumnMode.value = null
   renameColumnInitialValue.value = ''
+  renameColumnInitialType.value = 'text'
 }
 
-function openRenameColumnDialog(
-  columnKey: string,
-  mode: RenameColumnMode,
-  initialValue?: string,
-) {
+function openRenameColumnDialog(columnKey: string, initialValue?: string) {
   renameColumnTargetKey.value = columnKey
-  renameColumnMode.value = mode
-  renameColumnInitialValue.value =
-    initialValue ?? (mode === 'key' ? columnKey : resolveColumnLabel(columnKey))
+  renameColumnInitialValue.value = initialValue ?? resolveColumnLabel(columnKey)
+  renameColumnInitialType.value =
+    readGridColumns().find((column) => column.key === columnKey)?.column_type ?? 'text'
   renameColumnDialogOpen.value = true
 }
 
-function handleColumnRename(nextValue: string) {
+function handleColumnRename(payload: { name: string; columnType: GridColumnType }) {
   const columnKey = renameColumnTargetKey.value
-  const mode = renameColumnMode.value
   renameColumnDialogOpen.value = false
 
-  if (!columnKey || !mode) {
+  if (!columnKey) {
     clearRenameColumnDialogState()
     return
   }
 
-  if (mode === 'key') {
-    handleColumnReferenceKeyRename(columnKey, nextValue)
-    clearRenameColumnDialogState()
-    return
-  }
-
-  handleColumnTitleRename(columnKey, nextValue)
+  handleColumnNameRename(columnKey, payload.name, payload.columnType)
   clearRenameColumnDialogState()
 }
 
-function handleColumnTitleRename(columnKey: string, nextTitle: string) {
-  const normalizedLabel = nextTitle.trim()
-  if (!normalizedLabel) {
+function handleColumnNameRename(
+  columnKey: string,
+  nextName: string,
+  nextColumnType: GridColumnType,
+) {
+  const normalizedName = nextName.trim()
+  if (!normalizedName) {
+    return
+  }
+
+  if (validateSpreadsheetColumnFormulaAlias(normalizedName)) {
     return
   }
 
   const currentColumns = readGridColumns()
+  const currentColumn = currentColumns.find((column) => column.key === columnKey) ?? null
+  if (!currentColumn) {
+    return
+  }
+
+  const normalizedColumnType = normalizeGridColumnType(nextColumnType, nextColumnType)
+  const resolvedNextDataType = resolveGridColumnDataTypeForColumnType(normalizedColumnType)
+  const previousReferenceName = resolveGridColumnFormulaReferenceName(currentColumn)
+  const didRenameMetadata =
+    currentColumn.label !== normalizedName || previousReferenceName !== normalizedName
   const didChange = currentColumns.some(
-    (column) => column.key === columnKey && column.label !== normalizedLabel,
+    (column) =>
+      column.key === columnKey &&
+      (column.label !== normalizedName ||
+        resolveGridColumnFormulaReferenceName(column) !== normalizedName ||
+        column.column_type !== normalizedColumnType ||
+        column.data_type !== resolvedNextDataType),
   )
 
   if (!didChange) {
     return
   }
 
+  const currentRows = readGridRows()
   const beforeSnapshot = captureGridHistorySnapshot()
-  const nextColumns = currentColumns.map((column) =>
-    column.key === columnKey
-      ? {
-          ...column,
-          label: normalizedLabel,
-        }
-      : column,
-  )
+  const metadataColumns = didRenameMetadata
+    ? mutateSpreadsheetSheetColumns(currentColumns, (model) => {
+        const didRenameTitle = model.setColumnTitle(columnKey, normalizedName)
+        const didRenameFormulaAlias = model.setColumnFormulaAlias(columnKey, normalizedName)
+        return didRenameTitle || didRenameFormulaAlias
+      })
+    : currentColumns
 
-  applyGridStructureChange(nextColumns, readGridRows())
-  recordGridHistoryTransaction('Rename column title', beforeSnapshot)
+  if (!metadataColumns) {
+    return
+  }
+
+  const rewrittenStructure =
+    didRenameMetadata && previousReferenceName !== normalizedName
+      ? rewriteFormulaReferencesForRenamedColumnReferenceName(
+          currentColumns,
+          currentRows,
+          previousReferenceName,
+          normalizedName,
+        )
+      : {
+          columns: currentColumns,
+          rows: currentRows,
+        }
+  const nextColumns = rewrittenStructure.columns.map((column, index) => ({
+    ...column,
+    key: metadataColumns[index]?.key ?? column.key,
+    label: metadataColumns[index]?.label ?? column.label,
+    formula_alias: metadataColumns[index]?.formula_alias ?? column.formula_alias,
+    column_type:
+      column.key === columnKey
+        ? normalizedColumnType
+        : metadataColumns[index]?.column_type ?? column.column_type,
+    data_type:
+      column.key === columnKey
+        ? resolvedNextDataType
+        : metadataColumns[index]?.data_type ?? column.data_type,
+  }))
+
+  applyGridStructureChange(nextColumns, rewrittenStructure.rows)
+  recordGridHistoryTransaction('Rename column', beforeSnapshot)
 }
 
 function handleColumnReferenceKeyRename(columnKey: string, nextReferenceKey: string) {
@@ -2447,20 +3346,25 @@ function handleColumnReferenceKeyRename(columnKey: string, nextReferenceKey: str
 
   const currentRows = readGridRows()
   const beforeSnapshot = captureGridHistorySnapshot()
+  const metadataColumns = mutateSpreadsheetSheetColumns(currentColumns, (model) =>
+    model.renameColumn(columnKey, normalizedColumnKey),
+  )
+  if (!metadataColumns) {
+    return
+  }
+
   const rewrittenStructure = rewriteFormulaReferencesForRenamedColumnKey(
     currentColumns,
     currentRows,
     columnKey,
     normalizedColumnKey,
   )
-  const nextColumns = rewrittenStructure.columns.map((column) =>
-    column.key === columnKey
-      ? {
-          ...column,
-          key: normalizedColumnKey,
-        }
-      : column,
-  )
+  const nextColumns = rewrittenStructure.columns.map((column, index) => ({
+    ...column,
+    key: metadataColumns[index]?.key ?? column.key,
+    label: metadataColumns[index]?.label ?? column.label,
+    formula_alias: metadataColumns[index]?.formula_alias ?? column.formula_alias,
+  }))
   const nextRows = rewrittenStructure.rows.map((row) => {
     if (!Object.prototype.hasOwnProperty.call(row, columnKey)) {
       return row
@@ -2537,6 +3441,11 @@ function readGridColumns() {
   return [...orderedColumns, ...remainingColumns].map((column) => {
     const meta = isRecord(column.column.meta) ? column.column.meta : {}
     const settings = isRecord(meta.settings) ? { ...meta.settings } : {}
+    const formulaAlias = normalizeOptionalString(
+      meta.formulaAlias ?? settings.formulaAlias ?? settings.formula_alias,
+    )
+    delete settings.formulaAlias
+    delete settings.formula_alias
     const options = normalizeStringArray(meta.options)
     if (options.length) {
       settings.options = [...options]
@@ -2545,6 +3454,7 @@ function readGridColumns() {
     return {
       key: column.key,
       label: asString(column.column.label).trim() || column.key,
+      formula_alias: formulaAlias,
       data_type: normalizeGridColumnDataType(column.column.dataType, meta.dataType),
       column_type: normalizeGridColumnType(meta.columnType, column.column.dataType),
       width: typeof column.state.width === 'number' ? column.state.width : null,
@@ -2686,13 +3596,20 @@ const readGridFilterCell = defineDataGridFilterCellReader<GridRow>()((rowNode, c
 
 function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridRow> {
   const dataType = resolveDataGridFormatType(column)
+  const cellType = resolveDataGridCellType(column)
   const expression = normalizeFormulaExpression(column.expression)
   const isFormulaColumn = isFormulaColumnDefinition(column)
+  const formulaAlias = normalizeOptionalString(column.formula_alias)
+  const settings = { ...column.settings }
+  if (formulaAlias) {
+    settings.formulaAlias = formulaAlias
+  }
   const baseColumn: DataGridAppColumnInput<GridRow> = {
     key: column.key,
     field: column.key,
     label: column.label,
     dataType,
+    cellType,
     formula: expression,
     initialState: column.width ? { width: column.width } : undefined,
     capabilities: {
@@ -2708,12 +3625,17 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
     meta: {
       columnType: column.column_type,
       dataType: column.data_type,
+      formulaAlias,
       editable: column.editable && !isFormulaColumn,
       computed: column.computed || Boolean(expression),
       expression,
       options: [...column.options],
-      settings: { ...column.settings },
+      settings,
     },
+  }
+
+  if (column.column_type === 'checkbox' || column.column_type === 'select') {
+    return baseColumn
   }
 
   return {
@@ -2810,7 +3732,7 @@ function resolveColumnPresentation(column: SheetGridColumn): GridColumnPresentat
     presentation.headerAlign = 'right'
   }
 
-  if (column.data_type === 'status' && column.options.length) {
+  if ((column.data_type === 'status' || column.column_type === 'select') && column.options.length) {
     presentation.options = [...column.options]
   }
 
@@ -2847,8 +3769,62 @@ function resolveDataGridFormatType(column: SheetGridColumn) {
   return column.data_type
 }
 
+function resolveDataGridCellType(column: SheetGridColumn) {
+  if (column.column_type === 'checkbox') {
+    return 'checkbox' as const
+  }
+
+  if (column.column_type === 'select') {
+    return 'select' as const
+  }
+
+  if (column.column_type === 'status' && column.options.length) {
+    return 'select' as const
+  }
+
+  if (column.column_type === 'datetime') {
+    return 'datetime' as const
+  }
+
+  if (column.column_type === 'date') {
+    return 'date' as const
+  }
+
+  if (column.column_type === 'percent') {
+    return 'percent' as const
+  }
+
+  if (column.column_type === 'currency') {
+    return 'currency' as const
+  }
+
+  if (column.column_type === 'number') {
+    return 'number' as const
+  }
+
+  if (isFormulaColumnDefinition(column)) {
+    return 'formula' as const
+  }
+
+  return 'text' as const
+}
+
 function resolveColumnLabel(columnKey: string) {
   return runtimeColumns.value.find((column) => column.key === columnKey)?.label ?? columnKey
+}
+
+function resolveColumnFormulaReferenceLabel(columnKey: string) {
+  const runtimeColumn = runtimeColumns.value.find((column) => column.key === columnKey)
+  if (runtimeColumn) {
+    return resolveGridColumnFormulaReferenceName(runtimeColumn)
+  }
+
+  const inputColumn = inputColumns.value.find((column) => column.key === columnKey)
+  if (inputColumn) {
+    return resolveGridColumnFormulaReferenceName(inputColumn)
+  }
+
+  return columnKey
 }
 
 function formatFormulaReferenceChipLabel(target: SpreadsheetFormulaReferenceTarget) {
@@ -2887,19 +3863,8 @@ function normalizeGridColumnDataType(
 }
 
 function normalizeGridColumnType(value: unknown, dataTypeFallback: unknown): GridColumnType {
-  const resolved = asString(value).trim().toLowerCase()
-  if (
-    resolved === 'text' ||
-    resolved === 'number' ||
-    resolved === 'currency' ||
-    resolved === 'date' ||
-    resolved === 'datetime' ||
-    resolved === 'duration' ||
-    resolved === 'percent' ||
-    resolved === 'status' ||
-    resolved === 'user' ||
-    resolved === 'formula'
-  ) {
+  const resolved = normalizeGridColumnTypeValue(value)
+  if (resolved) {
     return resolved
   }
 
@@ -2928,6 +3893,11 @@ function normalizeStringArray(value: unknown) {
   return value
     .map((item) => asString(item).trim())
     .filter((item) => item.length > 0)
+}
+
+function normalizeOptionalString(value: unknown) {
+  const normalized = asString(value).trim()
+  return normalized || null
 }
 
 function uniqueColumnKey(label: string, existingKeys: Set<string>) {
@@ -2986,6 +3956,7 @@ function rewriteFormulaReferencesForInsertedRows(
     currentSheetId: props.sheetId,
     currentSheetKey: props.sheet?.key ?? props.sheetId ?? null,
     currentSheetName: props.sheet?.name ?? props.sheetName,
+    workbookSheets: formulaWorkbookSheets.value,
     insertAtRowIndex,
     rowCount,
   })
@@ -3001,8 +3972,25 @@ function rewriteFormulaReferencesForRenamedColumnKey(
     currentSheetId: props.sheetId,
     currentSheetKey: props.sheet?.key ?? props.sheetId ?? null,
     currentSheetName: props.sheet?.name ?? props.sheetName,
+    workbookSheets: formulaWorkbookSheets.value,
     previousColumnKey,
     nextColumnKey,
+  })
+}
+
+function rewriteFormulaReferencesForRenamedColumnReferenceName(
+  columns: SheetGridColumn[],
+  rows: GridRow[],
+  previousReferenceName: string,
+  nextReferenceName: string,
+) {
+  return rewriteSpreadsheetFormulasForColumnReferenceNameRename(columns, rows, {
+    currentSheetId: props.sheetId,
+    currentSheetKey: props.sheet?.key ?? props.sheetId ?? null,
+    currentSheetName: props.sheet?.name ?? props.sheetName,
+    workbookSheets: formulaWorkbookSheets.value,
+    previousReferenceName,
+    nextReferenceName,
   })
 }
 
@@ -3149,6 +4137,14 @@ defineExpose<SheetStageHandle>({
           @click.capture="handleGridClickCapture"
           @dblclick.capture="handleGridDoubleClickCapture"
         >
+          <div class="sheet-grid-stage__index-pane-canvas" aria-hidden="true">
+            <canvas ref="indexPaneCanvasRef" />
+          </div>
+
+          <div class="sheet-grid-stage__formula-reference-canvas" aria-hidden="true">
+            <canvas ref="formulaReferenceCanvasRef" />
+          </div>
+
           <TypedDataGrid
             ref="dataGridRef"
             :key="gridRenderVersion"
@@ -3264,15 +4260,16 @@ defineExpose<SheetStageHandle>({
       </UiButton>
     </div>
 
-    <AppDialog
+    <RenameColumnDialog
       v-model="renameColumnDialogOpen"
-      :title="renameColumnMode === 'key' ? 'Rename reference key' : 'Rename display title'"
-      :description="renameColumnMode === 'key'
-        ? 'Update the semantic column key and rewrite formula references that point to it.'
-        : 'Update the visible header text without changing formula/reference identity.'"
-      :confirm-label="renameColumnMode === 'key' ? 'Save key' : 'Save title'"
-      eyebrow="Rename"
-      :initial-value="renameColumnInitialValue"
+      title="Column Name"
+      description="Update the visible column title and the formula-facing column name together. Closing brackets are not allowed."
+      confirm-label="Save name"
+      eyebrow="Column"
+      :initial-name="renameColumnInitialValue"
+      :initial-column-type="renameColumnInitialType"
+      :name-validator="renameColumnDialogValidator"
+      :column-type-options="GRID_COLUMN_TYPE_OPTIONS"
       @submit="handleColumnRename"
     />
 

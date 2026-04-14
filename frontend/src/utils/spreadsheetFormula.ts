@@ -5,15 +5,21 @@ import {
   parseDataGridFormulaExpression,
   parseDataGridFormulaIdentifier,
   parseFormulaReferenceSegments,
-  type DataGridFormulaAstNode,
   type DataGridCompiledFormulaField,
   type DataGridFormulaDiagnosticsResult,
   type DataGridFormulaRowSelector,
   type DataGridFormulaTableRowsSource,
   type DataGridFormulaValue,
 } from '@affino/datagrid-formula-engine'
+import {
+  analyzeDataGridSpreadsheetCellInput,
+  resolveDataGridSpreadsheetFormulaReferenceBounds,
+  rewriteDataGridSpreadsheetFormulaReferences,
+  type DataGridSpreadsheetFormulaReferenceSpan,
+} from '@affino/datagrid-core'
 
 import type { GridColumn } from '@/types/workspace'
+import { resolveGridColumnFormulaReferenceName } from '@/utils/spreadsheetColumnModel'
 
 type GridRow = Record<string, unknown>
 type DataGridFormulaToken = NonNullable<DataGridFormulaDiagnosticsResult['tokens']>[number]
@@ -23,8 +29,16 @@ export interface SpreadsheetFormulaWorkbookSheet {
   key: string
   name: string
   kind?: string
+  aliases?: readonly string[]
   columns: GridColumn[]
   rows: GridRow[]
+}
+
+export interface SpreadsheetFormulaSheetIdentity {
+  id: string
+  key: string
+  name: string
+  aliases?: readonly string[]
 }
 
 export interface SpreadsheetFormulaBuildOptions {
@@ -37,7 +51,7 @@ export interface SpreadsheetFormulaBuildOptions {
 export interface SpreadsheetFormulaRowInsertRewriteOptions
   extends Pick<
     SpreadsheetFormulaBuildOptions,
-    'currentSheetId' | 'currentSheetKey' | 'currentSheetName'
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName' | 'workbookSheets'
   > {
   insertAtRowIndex: number
   rowCount?: number
@@ -46,10 +60,20 @@ export interface SpreadsheetFormulaRowInsertRewriteOptions
 export interface SpreadsheetFormulaColumnKeyRenameRewriteOptions
   extends Pick<
     SpreadsheetFormulaBuildOptions,
-    'currentSheetId' | 'currentSheetKey' | 'currentSheetName'
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName' | 'workbookSheets'
   > {
   previousColumnKey: string
   nextColumnKey: string
+}
+
+export interface SpreadsheetFormulaColumnReferenceNameRenameRewriteOptions
+  extends Pick<
+    SpreadsheetFormulaBuildOptions,
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName' | 'workbookSheets'
+  > {
+  previousReferenceName: string
+  nextReferenceName: string
+  includeImplicitReferences?: boolean
 }
 
 export interface SpreadsheetFormulaCellResult {
@@ -105,14 +129,9 @@ export interface SpreadsheetFormulaInputAnalysis {
   errorMessage: string
   isIncomplete: boolean
   highlightSegments: SpreadsheetFormulaHighlightSegment[]
+  referenceSpans: readonly DataGridSpreadsheetFormulaReferenceSpan[]
   referenceOccurrences: SpreadsheetFormulaReferenceOccurrence[]
   referenceTargets: SpreadsheetFormulaReferenceTarget[]
-}
-
-interface ColumnLookupMaps {
-  keyByLabel: Map<string, string>
-  keyByLowerLabel: Map<string, string>
-  keyByLowerKey: Map<string, string>
 }
 
 interface SpreadsheetFormulaResolvedSheet {
@@ -120,9 +139,9 @@ interface SpreadsheetFormulaResolvedSheet {
   key: string
   name: string
   kind: string | null
+  aliases: readonly string[]
   columns: GridColumn[]
   rows: GridRow[]
-  columnLookup: ColumnLookupMaps
 }
 
 interface SpreadsheetFormulaWorkbookRuntime {
@@ -130,6 +149,7 @@ interface SpreadsheetFormulaWorkbookRuntime {
   sheets: SpreadsheetFormulaResolvedSheet[]
   sheetById: Map<string, SpreadsheetFormulaResolvedSheet>
   sheetByLowerId: Map<string, SpreadsheetFormulaResolvedSheet>
+  sheetByLowerAlias: Map<string, SpreadsheetFormulaResolvedSheet>
   sheetByLowerKey: Map<string, SpreadsheetFormulaResolvedSheet>
   sheetByLowerName: Map<string, SpreadsheetFormulaResolvedSheet>
   tableSheetByAlias: Map<string, SpreadsheetFormulaResolvedSheet>
@@ -150,8 +170,6 @@ interface SpreadsheetFormulaErrorValue {
 }
 
 const compiledFormulaCache = new Map<string, DataGridCompiledFormulaField<GridRow>>()
-const EMPTY_SHEET_ALIAS_SET = new Set<string>()
-
 export const FORMULA_REFERENCE_OPTIONS = {
   syntax: 'smartsheet',
   smartsheetAbsoluteRowBase: 1,
@@ -174,6 +192,10 @@ export function isSpreadsheetFormulaValue(value: unknown) {
 export function rebaseSpreadsheetFormulaRowsAfterReorder(
   previousRows: GridRow[],
   nextRows: GridRow[],
+  options: Pick<
+    SpreadsheetFormulaBuildOptions,
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName' | 'workbookSheets'
+  > = {},
 ) {
   if (previousRows.length === 0 || previousRows.length !== nextRows.length) {
     return nextRows
@@ -196,6 +218,7 @@ export function rebaseSpreadsheetFormulaRowsAfterReorder(
   }
 
   const nextRowIndexById = new Map(nextRowIds.map((rowId, index) => [rowId, index]))
+  const currentSheetAliases = buildCurrentSheetAliasSet(options)
   let didRewriteAnyFormula = false
   const rewrittenRows = nextRows.map((row) => {
     let nextRow: GridRow | null = null
@@ -209,6 +232,7 @@ export function rebaseSpreadsheetFormulaRowsAfterReorder(
         String(cellValue),
         previousRowIds,
         nextRowIndexById,
+        currentSheetAliases,
       )
       if (rewrittenValue === cellValue) {
         continue
@@ -362,6 +386,76 @@ export function rewriteSpreadsheetFormulasForColumnKeyRename(
   }
 }
 
+export function rewriteSpreadsheetFormulasForColumnReferenceNameRename(
+  columns: GridColumn[],
+  rows: GridRow[],
+  options: SpreadsheetFormulaColumnReferenceNameRenameRewriteOptions,
+) {
+  const rewriter = createSpreadsheetFormulaColumnReferenceNameRenameRewriter(options)
+  if (!rewriter.previousReferenceName || !rewriter.nextReferenceName) {
+    return {
+      columns,
+      rows,
+    }
+  }
+
+  let didRewriteColumns = false
+  const rewrittenColumns = columns.map((column) => {
+    const normalizedExpression = normalizeSpreadsheetFormulaExpression(column.expression)
+    if (!normalizedExpression) {
+      return column
+    }
+
+    const rewrittenExpression = rewriteSpreadsheetFormulaInputForColumnReferenceNameChange(
+      String(column.expression),
+      rewriter,
+    )
+    const nextExpression = normalizeSpreadsheetFormulaExpression(rewrittenExpression)
+    if (nextExpression === normalizedExpression) {
+      return column
+    }
+
+    didRewriteColumns = true
+    return {
+      ...column,
+      expression: nextExpression,
+    }
+  })
+
+  let didRewriteRows = false
+  const rewrittenRows = rows.map((row) => {
+    let nextRow: GridRow | null = null
+
+    for (const [columnKey, cellValue] of Object.entries(row)) {
+      if (!isSpreadsheetFormulaValue(cellValue)) {
+        continue
+      }
+
+      const rewrittenValue = rewriteSpreadsheetFormulaInputForColumnReferenceNameChange(
+        String(cellValue),
+        rewriter,
+      )
+      if (rewrittenValue === cellValue) {
+        continue
+      }
+
+      if (!nextRow) {
+        nextRow = { ...row }
+      }
+
+      nextRow[columnKey] = rewrittenValue
+      didRewriteRows = true
+    }
+
+    return nextRow ?? row
+  })
+
+  return {
+    columns: didRewriteColumns ? rewrittenColumns : columns,
+    rows: didRewriteRows ? rewrittenRows : rows,
+  }
+}
+
 function createSpreadsheetFormulaComputationState(
   columns: GridColumn[],
   rows: GridRow[],
@@ -397,9 +491,9 @@ function createSpreadsheetFormulaWorkbookRuntime(
       key: sheet.key?.trim() || sheetId,
       name: sheet.name?.trim() || sheet.key?.trim() || sheetId,
       kind: sheet.kind?.trim() || null,
+      aliases: (sheet.aliases ?? []).map((alias) => alias.trim()).filter((alias) => alias.length > 0),
       columns: sheet.columns,
       rows: sheet.rows,
-      columnLookup: buildColumnLookup(sheet.columns),
     })
   }
 
@@ -408,14 +502,15 @@ function createSpreadsheetFormulaWorkbookRuntime(
     key: currentSheetKey,
     name: currentSheetName,
     kind: sheets.get(currentSheetId)?.kind ?? null,
+    aliases: sheets.get(currentSheetId)?.aliases ?? [],
     columns,
     rows,
-    columnLookup: buildColumnLookup(columns),
   })
 
   const orderedSheets = [...sheets.values()]
   const sheetById = new Map<string, SpreadsheetFormulaResolvedSheet>()
   const sheetByLowerId = new Map<string, SpreadsheetFormulaResolvedSheet>()
+  const sheetByLowerAlias = new Map<string, SpreadsheetFormulaResolvedSheet>()
   const sheetByLowerKey = new Map<string, SpreadsheetFormulaResolvedSheet>()
   const sheetByLowerName = new Map<string, SpreadsheetFormulaResolvedSheet>()
   const tableSheetByAlias = new Map<string, SpreadsheetFormulaResolvedSheet>()
@@ -425,6 +520,10 @@ function createSpreadsheetFormulaWorkbookRuntime(
     sheetByLowerId.set(sheet.id.trim().toLowerCase(), sheet)
     registerWorkbookSheetAlias(sheetByLowerKey, sheet.key, sheet)
     registerWorkbookSheetAlias(sheetByLowerName, sheet.name, sheet)
+    for (const alias of sheet.aliases) {
+      registerWorkbookSheetAlias(sheetByLowerAlias, alias, sheet)
+      registerWorkbookSheetAlias(tableSheetByAlias, alias, sheet)
+    }
     registerWorkbookSheetAlias(tableSheetByAlias, sheet.key, sheet)
     registerWorkbookSheetAlias(tableSheetByAlias, sheet.name, sheet)
     registerWorkbookSheetAlias(tableSheetByAlias, sheet.id, sheet)
@@ -435,6 +534,7 @@ function createSpreadsheetFormulaWorkbookRuntime(
     sheets: orderedSheets,
     sheetById,
     sheetByLowerId,
+    sheetByLowerAlias,
     sheetByLowerKey,
     sheetByLowerName,
     tableSheetByAlias,
@@ -591,6 +691,7 @@ export function analyzeSpreadsheetFormulaInput(
           referenceToneIndex: null,
         },
       ],
+      referenceSpans: [],
       referenceOccurrences: [],
       referenceTargets: [],
     }
@@ -600,11 +701,38 @@ export function analyzeSpreadsheetFormulaInput(
   const tokens = resolveFormulaTokens(normalizedExpression, diagnostics)
   const isIncomplete = isIncompleteFormulaDraft(normalizedExpression, diagnostics, tokens)
   const workbook = createSpreadsheetFormulaWorkbookRuntime(columns, rows, options)
+  const spreadsheetAnalysis = analyzeDataGridSpreadsheetCellInput(inputValue, {
+    currentRowIndex,
+    rowCount: rows.length,
+    resolveReferenceRowCount: (reference) => {
+      const currentSheet = workbook.currentSheet
+      if (!currentSheet) {
+        return rows.length
+      }
+
+      const targetSheet = resolveWorkbookSheetReference(
+        reference.sheetReference,
+        workbook,
+        currentSheet,
+      )
+
+      return targetSheet?.rows.length ?? null
+    },
+    referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+  })
   const { referenceOccurrences, referenceTargets } = resolveReferenceTargets(
     normalizedExpression,
     currentRowIndex,
     workbook,
+    spreadsheetAnalysis.references.map((reference) => ({
+      ...reference,
+      span: {
+        start: reference.span.start - (spreadsheetAnalysis.formulaSpan?.start ?? 0),
+        end: reference.span.end - (spreadsheetAnalysis.formulaSpan?.start ?? 0),
+      },
+    })),
     tokens,
+    isIncomplete,
   )
   const toneBySpan = new Map(
     referenceOccurrences.map((occurrence) => [`${occurrence.spanStart}:${occurrence.spanEnd}`, occurrence.toneIndex]),
@@ -626,6 +754,7 @@ export function analyzeSpreadsheetFormulaInput(
       toneByIdentifier,
       !isIncomplete,
     ),
+    referenceSpans: spreadsheetAnalysis.references,
     referenceOccurrences,
     referenceTargets,
   }
@@ -811,29 +940,37 @@ function resolveReferenceValue(
     )
   }
 
-  const columnKeys = resolveReferenceColumnKeys(
+    const resolvedReferenceBounds = resolveSpreadsheetReferenceBoundsForSheet({
+      key: `runtime:${sheetReference ?? currentSheet.id}:${referenceName}:${rangeReferenceName ?? ''}`,
+      text: buildReferenceDisplayLabel(referenceName, rangeReferenceName),
+      identifier: referenceName,
+      sheetReference,
     referenceName,
     rangeReferenceName,
-    targetSheet.columns,
-    targetSheet.columnLookup,
-  )
-  if (!columnKeys.length) {
+      rowSelector,
+      currentRowIndex,
+      targetSheet,
+      activeSheetId: currentSheet.id,
+    })
+
+    if (!resolvedReferenceBounds.rowIndexes.length) {
+      return createFormulaErrorValue(
+        'REF',
+        `Referenced row does not exist on sheet "${targetSheet.name}".`,
+      )
+    }
+
+    if (!resolvedReferenceBounds.columnKeys.length) {
     return createFormulaErrorValue(
       'REF',
       buildMissingReferenceMessage(referenceName, rangeReferenceName, targetSheet.name),
     )
   }
 
-  const rowIndices = resolveRowIndices(rowSelector, currentRowIndex, targetSheet.rows.length)
-  if (!rowIndices.length) {
-    return createFormulaErrorValue(
-      'REF',
-      `Referenced row does not exist on sheet "${targetSheet.name}".`,
-    )
-  }
-
-  const values = rowIndices.flatMap((rowIndex) =>
-    columnKeys.map((columnKey) => resolveResolvedCellValue(targetSheet, rowIndex, columnKey, state)),
+    const values = resolvedReferenceBounds.rowIndexes.flatMap((rowIndex) =>
+      resolvedReferenceBounds.columnKeys.map((columnKey) =>
+        resolveResolvedCellValue(targetSheet, rowIndex, columnKey, state),
+      ),
   )
 
   return values.length === 1 ? values[0] : values
@@ -895,73 +1032,83 @@ function resolveReferenceTargets(
   expression: string,
   currentRowIndex: number,
   workbook: SpreadsheetFormulaWorkbookRuntime,
+  references: readonly DataGridSpreadsheetFormulaReferenceSpan[],
   tokens: readonly DataGridFormulaToken[],
+  allowTokenFallback: boolean,
 ) {
   const currentSheet = workbook.currentSheet
   const referenceOccurrences: SpreadsheetFormulaReferenceOccurrence[] = []
   const targets: SpreadsheetFormulaReferenceTarget[] = []
   const seen = new Set<string>()
-  const appendReferenceTargets = (
-    occurrenceId: string,
-    rawIdentifier: string,
-    sheetReference: string | null,
-    referenceName: string,
-    rangeReferenceName: string | null,
-    rowSelector: DataGridFormulaRowSelector,
-    dependencyIndex: number,
-    spanStart: number,
-    spanEnd: number,
-  ) => {
+  const appendReferenceTargets = (reference: DataGridSpreadsheetFormulaReferenceSpan) => {
     if (!currentSheet) {
       return
     }
 
-    const targetSheet = resolveWorkbookSheetReference(sheetReference, workbook, currentSheet)
+    const targetSheet = resolveWorkbookSheetReference(reference.sheetReference, workbook, currentSheet)
     if (!targetSheet) {
       return
     }
 
-    const columnKeys = resolveReferenceColumnKeys(
-      referenceName,
-      rangeReferenceName,
-      targetSheet.columns,
-      targetSheet.columnLookup,
-    )
-    if (!columnKeys.length) {
+    const resolvedReferenceBounds = resolveSpreadsheetReferenceBoundsForSheet({
+      key: reference.key,
+      text: reference.text,
+      identifier: reference.identifier,
+      sheetReference: reference.sheetReference,
+      referenceName: reference.referenceName,
+      rangeReferenceName: reference.rangeReferenceName,
+      rowSelector: reference.rowSelector,
+      currentRowIndex,
+      targetSheet,
+      activeSheetId: currentSheet.id,
+      preferredTargetRowIndexes: reference.targetRowIndexes,
+    })
+    if (!resolvedReferenceBounds.bounds) {
       return
     }
 
-    const rowIndices = resolveRowIndices(rowSelector, currentRowIndex, targetSheet.rows.length)
     const occurrenceTargets: SpreadsheetFormulaReferenceTarget[] = []
 
-    for (const rowIndex of rowIndices) {
+    for (
+      let rowIndex = resolvedReferenceBounds.bounds.startRowIndex;
+      rowIndex <= resolvedReferenceBounds.bounds.endRowIndex;
+      rowIndex += 1
+    ) {
       const row = targetSheet.rows[rowIndex]
       if (!row) {
         continue
       }
 
       const rowId = resolveRowId(row, rowIndex)
-      for (const columnKey of columnKeys) {
-        const targetKey = `${rawIdentifier}:${targetSheet.id}:${rowId}:${columnKey}`
+      for (
+        let columnIndex = resolvedReferenceBounds.bounds.startColumnIndex;
+        columnIndex <= resolvedReferenceBounds.bounds.endColumnIndex;
+        columnIndex += 1
+      ) {
+        const column = targetSheet.columns[columnIndex]
+        if (!column) {
+          continue
+        }
+
+        const targetKey = `${reference.text}:${targetSheet.id}:${rowId}:${column.key}`
         if (seen.has(targetKey)) {
           continue
         }
 
         seen.add(targetKey)
-        const columnLabel =
-          targetSheet.columns.find((column) => column.key === columnKey)?.label ?? columnKey
+        const columnLabel = resolveGridColumnFormulaReferenceName(column)
         const target = {
-          occurrenceId,
-          identifier: rawIdentifier,
-          label: buildReferenceDisplayLabel(referenceName, rangeReferenceName),
-          toneIndex: dependencyIndex % 6,
+          occurrenceId: `ref-${reference.index}-${reference.span.start}-${reference.span.end}`,
+          identifier: reference.text,
+          label: buildReferenceDisplayLabel(reference.referenceName, reference.rangeReferenceName),
+          toneIndex: reference.colorIndex % 6,
           sheetId: targetSheet.id,
           sheetKey: targetSheet.key,
           sheetName: targetSheet.name,
           isCurrentSheet: targetSheet.id === currentSheet.id,
           rowId,
           rowIndex,
-          columnKey,
+          columnKey: column.key,
           columnLabel,
         }
         occurrenceTargets.push(target)
@@ -975,69 +1122,72 @@ function resolveReferenceTargets(
 
     const primaryTarget = occurrenceTargets[0] ?? null
     referenceOccurrences.push({
-      id: occurrenceId,
-      identifier: rawIdentifier,
-      label: buildReferenceDisplayLabel(referenceName, rangeReferenceName),
-      toneIndex: dependencyIndex % 6,
+      id: `ref-${reference.index}-${reference.span.start}-${reference.span.end}`,
+      identifier: reference.text,
+      label: buildReferenceDisplayLabel(reference.referenceName, reference.rangeReferenceName),
+      toneIndex: reference.colorIndex % 6,
       sheetId: targetSheet.id,
       sheetKey: targetSheet.key,
       sheetName: targetSheet.name,
       isCurrentSheet: targetSheet.id === currentSheet.id,
-      columnKey: primaryTarget?.columnKey ?? columnKeys[0] ?? '',
-      columnLabel: primaryTarget?.columnLabel ?? columnKeys[0] ?? '',
-      spanStart,
-      spanEnd,
+      columnKey: primaryTarget?.columnKey ?? resolvedReferenceBounds.bounds.startColumnKey,
+      columnLabel:
+        primaryTarget?.columnLabel ??
+        resolveGridColumnFormulaReferenceName(
+          targetSheet.columns[resolvedReferenceBounds.bounds.startColumnIndex] ?? {
+            key: resolvedReferenceBounds.bounds.startColumnKey,
+            label: resolvedReferenceBounds.bounds.startColumnKey,
+            formula_alias: null,
+          },
+        ),
+      spanStart: reference.span.start,
+      spanEnd: reference.span.end,
       rowId: occurrenceTargets.length === 1 ? primaryTarget?.rowId ?? null : null,
       rowIndex: occurrenceTargets.length === 1 ? primaryTarget?.rowIndex ?? null : null,
       isSingleCell: occurrenceTargets.length === 1,
     })
   }
 
-  try {
-    const parsed = parseDataGridFormulaExpression(expression, {
-      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
-    })
-    const references = collectAstReferenceNodes(parsed.ast)
-
-    references.forEach((reference, dependencyIndex) => {
-      const rawIdentifier = expression.slice(reference.span.start, reference.span.end)
-      const occurrenceId = `ref-${dependencyIndex}-${reference.span.start}-${reference.span.end}`
-      appendReferenceTargets(
-        occurrenceId,
-        rawIdentifier,
-        reference.sheetReference,
-        reference.referenceName,
-        reference.rangeReferenceName ?? null,
-        reference.rowSelector,
-        dependencyIndex,
-        reference.span.start,
-        reference.span.end,
-      )
+  if (references.length > 0) {
+    references.forEach((reference) => {
+      appendReferenceTargets(reference)
     })
 
     return {
       referenceOccurrences,
       referenceTargets: targets,
     }
-  } catch {
-    collectTokenReferenceTargets(expression, tokens).forEach((reference, dependencyIndex) => {
-      const occurrenceId = `ref-${dependencyIndex}-${reference.spanStart}-${reference.spanEnd}`
-      appendReferenceTargets(
-        occurrenceId,
-        reference.rawIdentifier,
-        reference.sheetReference,
-        reference.referenceName,
-        reference.rangeReferenceName,
-        reference.rowSelector,
-        dependencyIndex,
-        reference.spanStart,
-        reference.spanEnd,
-      )
-    })
+  }
+
+  if (!allowTokenFallback) {
     return {
       referenceOccurrences,
       referenceTargets: targets,
     }
+  }
+
+  collectTokenReferenceTargets(expression, tokens).forEach((reference, dependencyIndex) => {
+    appendReferenceTargets({
+      key: `fallback-${dependencyIndex}-${reference.spanStart}-${reference.spanEnd}`,
+      index: dependencyIndex,
+      colorIndex: dependencyIndex % 6,
+      text: reference.rawIdentifier,
+      identifier: reference.rawIdentifier,
+      sheetReference: reference.sheetReference,
+      referenceName: reference.referenceName,
+      rangeReferenceName: reference.rangeReferenceName,
+      rowSelector: reference.rowSelector,
+      span: {
+        start: reference.spanStart,
+        end: reference.spanEnd,
+      },
+      targetRowIndexes: [],
+    })
+  })
+
+  return {
+    referenceOccurrences,
+    referenceTargets: targets,
   }
 }
 
@@ -1109,47 +1259,6 @@ function collectTokenReferenceTargets(
   return references
 }
 
-function collectAstReferenceNodes(
-  node: DataGridFormulaAstNode,
-  output: Array<{
-    sheetReference: string | null
-    referenceName: string
-    rangeReferenceName: string | null
-    rowSelector: DataGridFormulaRowSelector
-    span: { start: number; end: number }
-  }> = [],
-) {
-  if (node.kind === 'identifier') {
-    output.push({
-      sheetReference: node.sheetReference,
-      referenceName: node.referenceName,
-      rangeReferenceName: node.rangeReferenceName ?? null,
-      rowSelector: node.rowSelector,
-      span: node.span,
-    })
-    return output
-  }
-
-  if (node.kind === 'call') {
-    for (const argument of node.args) {
-      collectAstReferenceNodes(argument, output)
-    }
-    return output
-  }
-
-  if (node.kind === 'unary') {
-    collectAstReferenceNodes(node.value, output)
-    return output
-  }
-
-  if (node.kind === 'binary') {
-    collectAstReferenceNodes(node.left, output)
-    collectAstReferenceNodes(node.right, output)
-  }
-
-  return output
-}
-
 function createSpreadsheetFormulaRowInsertRewriter(
   options: SpreadsheetFormulaRowInsertRewriteOptions,
 ) {
@@ -1164,11 +1273,7 @@ function createSpreadsheetFormulaRowInsertRewriter(
       1,
       Number.isFinite(requestedRowCount) ? Math.trunc(requestedRowCount) : 1,
     ),
-    currentSheetAliases: buildSpreadsheetFormulaSheetAliasSet([
-      options.currentSheetId,
-      options.currentSheetKey,
-      options.currentSheetName,
-    ]),
+    currentSheetAliases: buildCurrentSheetAliasSet(options),
   }
 }
 
@@ -1182,12 +1287,57 @@ function createSpreadsheetFormulaColumnKeyRenameRewriter(
     previousColumnKey,
     previousColumnKeyLower: previousColumnKey.toLowerCase(),
     nextColumnKey,
-    currentSheetAliases: buildSpreadsheetFormulaSheetAliasSet([
-      options.currentSheetId,
-      options.currentSheetKey,
-      options.currentSheetName,
-    ]),
+    currentSheetAliases: buildCurrentSheetAliasSet(options),
   }
+}
+
+function createSpreadsheetFormulaColumnReferenceNameRenameRewriter(
+  options: SpreadsheetFormulaColumnReferenceNameRenameRewriteOptions,
+) {
+  const previousReferenceName = options.previousReferenceName.trim()
+  const nextReferenceName = options.nextReferenceName.trim()
+
+  return {
+    previousReferenceName,
+    previousReferenceNameLower: previousReferenceName.toLowerCase(),
+    nextReferenceName,
+    currentSheetAliases: buildCurrentSheetAliasSet(options),
+    includeImplicitReferences: options.includeImplicitReferences !== false,
+  }
+}
+
+function buildCurrentSheetAliasSet(
+  options: Pick<
+    SpreadsheetFormulaBuildOptions,
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName' | 'workbookSheets'
+  >,
+) {
+  const normalizedId = options.currentSheetId?.trim().toLowerCase() ?? null
+  const normalizedKey = options.currentSheetKey?.trim().toLowerCase() ?? null
+  const normalizedName = options.currentSheetName?.trim().toLowerCase() ?? null
+  const aliases = buildSpreadsheetFormulaSheetAliasSet([
+    options.currentSheetId,
+    options.currentSheetKey,
+    options.currentSheetName,
+  ])
+
+  const currentSheet =
+    options.workbookSheets?.find((sheet) => {
+      return (
+        (normalizedId !== null && sheet.id.trim().toLowerCase() === normalizedId) ||
+        (normalizedKey !== null && sheet.key.trim().toLowerCase() === normalizedKey) ||
+        (normalizedName !== null && sheet.name.trim().toLowerCase() === normalizedName)
+      )
+    }) ?? null
+
+  for (const alias of currentSheet?.aliases ?? []) {
+    const normalizedAlias = alias.trim().toLowerCase()
+    if (normalizedAlias) {
+      aliases.add(normalizedAlias)
+    }
+  }
+
+  return aliases
 }
 
 function buildSpreadsheetFormulaSheetAliasSet(values: Array<string | null | undefined>) {
@@ -1218,108 +1368,87 @@ function rewriteSpreadsheetFormulaInputForStructuralRowChange(
     return inputValue
   }
 
-  let references: Array<{
-    sheetReference: string | null
-    referenceName: string
-    rangeReferenceName: string | null
-    rowSelector: DataGridFormulaRowSelector
-    span: { start: number; end: number }
-  }> = []
-
   try {
-    const parsed = parseDataGridFormulaExpression(normalizedExpression, {
-      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
-    })
-    references = collectAstReferenceNodes(parsed.ast)
-  } catch {
-    return inputValue
-  }
+    return rewriteDataGridSpreadsheetFormulaReferences(
+      inputValue,
+      (reference: DataGridSpreadsheetFormulaReferenceSpan) => {
+        if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, rewriter.currentSheetAliases)) {
+          return null
+        }
 
-  if (!references.length) {
-    return inputValue
-  }
+        if (reference.rowSelector.kind === 'absolute') {
+          if (reference.rowSelector.rowIndex < rewriter.insertAtRowIndex) {
+            return null
+          }
 
-  const replacements = references
-    .map((reference) => {
-      if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, rewriter.currentSheetAliases)) {
-        return null
-      }
+          return {
+            sheetReference: reference.sheetReference,
+            referenceName: reference.referenceName,
+            rangeReferenceName: reference.rangeReferenceName,
+            rowSelector: {
+              kind: 'absolute' as const,
+              rowIndex: reference.rowSelector.rowIndex + rewriter.rowCount,
+            },
+          }
+        }
 
-      if (reference.rowSelector.kind === 'absolute') {
-        if (reference.rowSelector.rowIndex < rewriter.insertAtRowIndex) {
+        if (reference.rowSelector.kind !== 'absolute-window') {
+          return null
+        }
+
+        const nextStartRowIndex =
+          reference.rowSelector.startRowIndex >= rewriter.insertAtRowIndex
+            ? reference.rowSelector.startRowIndex + rewriter.rowCount
+            : reference.rowSelector.startRowIndex
+        const nextEndRowIndex =
+          reference.rowSelector.endRowIndex >= rewriter.insertAtRowIndex
+            ? reference.rowSelector.endRowIndex + rewriter.rowCount
+            : reference.rowSelector.endRowIndex
+
+        if (
+          nextStartRowIndex === reference.rowSelector.startRowIndex &&
+          nextEndRowIndex === reference.rowSelector.endRowIndex
+        ) {
           return null
         }
 
         return {
-          start: reference.span.start,
-          end: reference.span.end,
-          replacement: rewriteAbsoluteReferenceIdentifier(
-            normalizedExpression.slice(reference.span.start, reference.span.end),
-            reference.rowSelector.rowIndex + rewriter.rowCount + 1,
-          ),
+          sheetReference: reference.sheetReference,
+          referenceName: reference.referenceName,
+          rangeReferenceName: reference.rangeReferenceName,
+          rowSelector: {
+            kind: 'absolute-window' as const,
+            startRowIndex: nextStartRowIndex,
+            endRowIndex: nextEndRowIndex,
+          },
         }
-      }
-
-      if (reference.rowSelector.kind !== 'absolute-window') {
-        return null
-      }
-
-      const nextStartRowIndex =
-        reference.rowSelector.startRowIndex >= rewriter.insertAtRowIndex
-          ? reference.rowSelector.startRowIndex + rewriter.rowCount
-          : reference.rowSelector.startRowIndex
-      const nextEndRowIndex =
-        reference.rowSelector.endRowIndex >= rewriter.insertAtRowIndex
-          ? reference.rowSelector.endRowIndex + rewriter.rowCount
-          : reference.rowSelector.endRowIndex
-      if (
-        nextStartRowIndex === reference.rowSelector.startRowIndex &&
-        nextEndRowIndex === reference.rowSelector.endRowIndex
-      ) {
-        return null
-      }
-
-      return {
-        start: reference.span.start,
-        end: reference.span.end,
-        replacement: rewriteAbsoluteWindowReferenceIdentifier(
-          normalizedExpression.slice(reference.span.start, reference.span.end),
-          nextStartRowIndex + 1,
-          nextEndRowIndex + 1,
-        ),
-      }
-    })
-    .filter((entry): entry is { start: number; end: number; replacement: string } => Boolean(entry))
-
-  if (!replacements.length) {
+      },
+      {
+        referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+      },
+    )
+  } catch {
     return inputValue
   }
-
-  let nextExpression = normalizedExpression
-  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
-    nextExpression =
-      nextExpression.slice(0, replacement.start) +
-      replacement.replacement +
-      nextExpression.slice(replacement.end)
-  }
-
-  if (nextExpression === normalizedExpression) {
-    return inputValue
-  }
-
-  const prefix = /^(\s*=+\s*)/.exec(inputValue)?.[0] ?? ''
-  return `${prefix}${nextExpression}`
 }
 
 function shouldRewriteReferenceForCurrentSheet(
   sheetReference: string | null,
   currentSheetAliases: ReadonlySet<string>,
 ) {
+  return shouldRewriteReferenceForSheetReference(sheetReference, currentSheetAliases, true)
+}
+
+function shouldRewriteReferenceForSheetReference(
+  sheetReference: string | null,
+  currentSheetAliases: ReadonlySet<string>,
+  includeImplicitReferences: boolean,
+) {
   if (sheetReference === null) {
-    return true
+    return includeImplicitReferences
   }
 
-  for (const candidate of buildSheetReferenceCandidates(sheetReference)) {
+  for (const candidate of buildSpreadsheetFormulaSheetReferenceCandidates(sheetReference)) {
     if (currentSheetAliases.has(candidate.trim().toLowerCase())) {
       return true
     }
@@ -1332,106 +1461,84 @@ function rebaseSpreadsheetFormulaInputForRowReorder(
   inputValue: string,
   previousRowIds: readonly string[],
   nextRowIndexById: ReadonlyMap<string, number>,
+  currentSheetAliases: ReadonlySet<string>,
 ) {
   const normalizedExpression = normalizeSpreadsheetFormulaExpression(inputValue)
   if (!normalizedExpression) {
     return inputValue
   }
 
-  let references: Array<{
-    sheetReference: string | null
-    referenceName: string
-    rangeReferenceName: string | null
-    rowSelector: DataGridFormulaRowSelector
-    span: { start: number; end: number }
-  }> = []
-
   try {
-    const parsed = parseDataGridFormulaExpression(normalizedExpression, {
-      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
-    })
-    references = collectAstReferenceNodes(parsed.ast)
-  } catch {
-    return inputValue
-  }
-
-  if (!references.length) {
-    return inputValue
-  }
-
-  const replacements = references
-    .map((reference) => {
-      if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, EMPTY_SHEET_ALIAS_SET)) {
-        return null
-      }
-
-      if (reference.rowSelector.kind === 'absolute') {
-        const targetRowId = previousRowIds[reference.rowSelector.rowIndex] ?? null
-        if (!targetRowId) {
+    return rewriteDataGridSpreadsheetFormulaReferences(
+      inputValue,
+      (reference: DataGridSpreadsheetFormulaReferenceSpan) => {
+        if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, currentSheetAliases)) {
           return null
         }
 
-        const nextRowIndex = nextRowIndexById.get(targetRowId)
-        if (nextRowIndex === undefined) {
+        if (reference.rowSelector.kind === 'absolute') {
+          const targetRowId = previousRowIds[reference.rowSelector.rowIndex] ?? null
+          if (!targetRowId) {
+            return null
+          }
+
+          const nextRowIndex = nextRowIndexById.get(targetRowId)
+          if (nextRowIndex === undefined || nextRowIndex === reference.rowSelector.rowIndex) {
+            return null
+          }
+
+          return {
+            sheetReference: reference.sheetReference,
+            referenceName: reference.referenceName,
+            rangeReferenceName: reference.rangeReferenceName,
+            rowSelector: {
+              kind: 'absolute' as const,
+              rowIndex: nextRowIndex,
+            },
+          }
+        }
+
+        if (reference.rowSelector.kind !== 'absolute-window') {
+          return null
+        }
+
+        const startRowId = previousRowIds[reference.rowSelector.startRowIndex] ?? null
+        const endRowId = previousRowIds[reference.rowSelector.endRowIndex] ?? null
+        if (!startRowId || !endRowId) {
+          return null
+        }
+
+        const nextStartRowIndex = nextRowIndexById.get(startRowId)
+        const nextEndRowIndex = nextRowIndexById.get(endRowId)
+        if (nextStartRowIndex === undefined || nextEndRowIndex === undefined) {
+          return null
+        }
+
+        if (
+          nextStartRowIndex === reference.rowSelector.startRowIndex &&
+          nextEndRowIndex === reference.rowSelector.endRowIndex
+        ) {
           return null
         }
 
         return {
-          start: reference.span.start,
-          end: reference.span.end,
-          replacement: rewriteAbsoluteReferenceIdentifier(
-            normalizedExpression.slice(reference.span.start, reference.span.end),
-            nextRowIndex + 1,
-          ),
+          sheetReference: reference.sheetReference,
+          referenceName: reference.referenceName,
+          rangeReferenceName: reference.rangeReferenceName,
+          rowSelector: {
+            kind: 'absolute-window' as const,
+            startRowIndex: nextStartRowIndex,
+            endRowIndex: nextEndRowIndex,
+          },
         }
-      }
-
-      if (reference.rowSelector.kind !== 'absolute-window') {
-        return null
-      }
-
-      const startRowId = previousRowIds[reference.rowSelector.startRowIndex] ?? null
-      const endRowId = previousRowIds[reference.rowSelector.endRowIndex] ?? null
-      if (!startRowId || !endRowId) {
-        return null
-      }
-
-      const nextStartRowIndex = nextRowIndexById.get(startRowId)
-      const nextEndRowIndex = nextRowIndexById.get(endRowId)
-      if (nextStartRowIndex === undefined || nextEndRowIndex === undefined) {
-        return null
-      }
-
-      return {
-        start: reference.span.start,
-        end: reference.span.end,
-        replacement: rewriteAbsoluteWindowReferenceIdentifier(
-          normalizedExpression.slice(reference.span.start, reference.span.end),
-          nextStartRowIndex + 1,
-          nextEndRowIndex + 1,
-        ),
-      }
-    })
-    .filter((entry): entry is { start: number; end: number; replacement: string } => Boolean(entry))
-
-  if (!replacements.length) {
+      },
+      {
+        referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+      },
+    )
+  } catch {
     return inputValue
   }
-
-  let nextExpression = normalizedExpression
-  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
-    nextExpression =
-      nextExpression.slice(0, replacement.start) +
-      replacement.replacement +
-      nextExpression.slice(replacement.end)
-  }
-
-  if (nextExpression === normalizedExpression) {
-    return inputValue
-  }
-
-  const prefix = /^(\s*=+\s*)/.exec(inputValue)?.[0] ?? '='
-  return `${prefix}${nextExpression}`
 }
 
 function rewriteSpreadsheetFormulaInputForColumnKeyChange(
@@ -1448,261 +1555,105 @@ function rewriteSpreadsheetFormulaInputForColumnKeyChange(
     return inputValue
   }
 
-  let references: Array<{
-    sheetReference: string | null
-    referenceName: string
-    rangeReferenceName: string | null
-    rowSelector: DataGridFormulaRowSelector
-    span: { start: number; end: number }
-  }> = []
-
   try {
-    const parsed = parseDataGridFormulaExpression(normalizedExpression, {
-      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
-    })
-    references = collectAstReferenceNodes(parsed.ast)
+    return rewriteDataGridSpreadsheetFormulaReferences(
+      inputValue,
+      (reference: DataGridSpreadsheetFormulaReferenceSpan) => {
+        if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, rewriter.currentSheetAliases)) {
+          return null
+        }
+
+        const renamePrimary = doesReferenceNameMatchColumnKey(
+          reference.referenceName,
+          rewriter.previousColumnKeyLower,
+        )
+        const renameRange =
+          reference.rangeReferenceName !== null &&
+          doesReferenceNameMatchColumnKey(reference.rangeReferenceName, rewriter.previousColumnKeyLower)
+        if (!renamePrimary && !renameRange) {
+          return null
+        }
+
+        return {
+          sheetReference: reference.sheetReference,
+          referenceName: renamePrimary ? rewriter.nextColumnKey : reference.referenceName,
+          rangeReferenceName: renameRange ? rewriter.nextColumnKey : reference.rangeReferenceName,
+          rowSelector: reference.rowSelector,
+        }
+      },
+      {
+        referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+      },
+    )
   } catch {
     return inputValue
   }
-
-  if (!references.length) {
-    return inputValue
-  }
-
-  const replacements = references
-    .map((reference) => {
-      if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, rewriter.currentSheetAliases)) {
-        return null
-      }
-
-      const renamePrimary = doesReferenceNameMatchColumnKey(
-        reference.referenceName,
-        rewriter.previousColumnKeyLower,
-      )
-      const renameRange =
-        reference.rangeReferenceName !== null &&
-        doesReferenceNameMatchColumnKey(reference.rangeReferenceName, rewriter.previousColumnKeyLower)
-      if (!renamePrimary && !renameRange) {
-        return null
-      }
-
-      const rawIdentifier = normalizedExpression.slice(reference.span.start, reference.span.end)
-      const replacement = rewriteReferenceIdentifierColumnNames(rawIdentifier, {
-        nextColumnKey: rewriter.nextColumnKey,
-        renamePrimary,
-        renameRange,
-      })
-      if (replacement === rawIdentifier) {
-        return null
-      }
-
-      return {
-        start: reference.span.start,
-        end: reference.span.end,
-        replacement,
-      }
-    })
-    .filter((entry): entry is { start: number; end: number; replacement: string } => Boolean(entry))
-
-  if (!replacements.length) {
-    return inputValue
-  }
-
-  let nextExpression = normalizedExpression
-  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
-    nextExpression =
-      nextExpression.slice(0, replacement.start) +
-      replacement.replacement +
-      nextExpression.slice(replacement.end)
-  }
-
-  if (nextExpression === normalizedExpression) {
-    return inputValue
-  }
-
-  const prefix = /^(\s*=+\s*)/.exec(inputValue)?.[0] ?? '='
-  return `${prefix}${nextExpression}`
 }
 
-function rewriteAbsoluteReferenceIdentifier(rawIdentifier: string, rowNumber: number) {
-  const spans = collectReferenceRowNumberSpans(rawIdentifier)
-  if (!spans.length) {
-    return rawIdentifier
-  }
-
-  return replaceReferenceRowNumberSpans(rawIdentifier, [rowNumber])
-}
-
-function rewriteAbsoluteWindowReferenceIdentifier(
-  rawIdentifier: string,
-  startRowNumber: number,
-  endRowNumber: number,
+function rewriteSpreadsheetFormulaInputForColumnReferenceNameChange(
+  inputValue: string,
+  rewriter: {
+    previousReferenceName: string
+    previousReferenceNameLower: string
+    nextReferenceName: string
+    currentSheetAliases: ReadonlySet<string>
+    includeImplicitReferences: boolean
+  },
 ) {
-  const spans = collectReferenceRowNumberSpans(rawIdentifier)
-  if (!spans.length) {
-    return rawIdentifier
+  const normalizedExpression = normalizeSpreadsheetFormulaExpression(inputValue)
+  if (!normalizedExpression) {
+    return inputValue
   }
 
-  if (spans.length === 1) {
-    return replaceReferenceRowNumberSpans(rawIdentifier, [startRowNumber])
-  }
+  try {
+    return rewriteDataGridSpreadsheetFormulaReferences(
+      inputValue,
+      (reference: DataGridSpreadsheetFormulaReferenceSpan) => {
+        if (
+          !shouldRewriteReferenceForSheetReference(
+            reference.sheetReference,
+            rewriter.currentSheetAliases,
+            rewriter.includeImplicitReferences,
+          )
+        ) {
+          return null
+        }
 
-  return replaceReferenceRowNumberSpans(rawIdentifier, [startRowNumber, endRowNumber])
+        const renamePrimary = doesReferenceNameMatchTarget(
+          reference.referenceName,
+          rewriter.previousReferenceNameLower,
+        )
+        const renameRange =
+          reference.rangeReferenceName !== null &&
+          doesReferenceNameMatchTarget(reference.rangeReferenceName, rewriter.previousReferenceNameLower)
+        if (!renamePrimary && !renameRange) {
+          return null
+        }
+
+        return {
+          sheetReference: reference.sheetReference,
+          referenceName: renamePrimary ? rewriter.nextReferenceName : reference.referenceName,
+          rangeReferenceName: renameRange ? rewriter.nextReferenceName : reference.rangeReferenceName,
+          rowSelector: reference.rowSelector,
+        }
+      },
+      {
+        referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+      },
+    )
+  } catch {
+    return inputValue
+  }
 }
 
 function doesReferenceNameMatchColumnKey(referenceName: string, previousColumnKeyLower: string) {
+  return doesReferenceNameMatchTarget(referenceName, previousColumnKeyLower)
+}
+
+function doesReferenceNameMatchTarget(referenceName: string, targetLower: string) {
   return buildReferenceNameCandidates(referenceName).some(
-    (candidate) => candidate.trim().toLowerCase() === previousColumnKeyLower,
+    (candidate) => candidate.trim().toLowerCase() === targetLower,
   )
-}
-
-function rewriteReferenceIdentifierColumnNames(
-  rawIdentifier: string,
-  options: {
-    nextColumnKey: string
-    renamePrimary: boolean
-    renameRange: boolean
-  },
-) {
-  const spans = collectReferenceNameSpans(rawIdentifier)
-  if (!spans.length) {
-    return rawIdentifier
-  }
-
-  const replacementName = escapeSpreadsheetFormulaReferenceName(options.nextColumnKey)
-  let nextIdentifier = rawIdentifier
-
-  if (options.renameRange && spans[1]) {
-    nextIdentifier =
-      nextIdentifier.slice(0, spans[1].start) +
-      replacementName +
-      nextIdentifier.slice(spans[1].end)
-  }
-
-  if (options.renamePrimary && spans[0]) {
-    nextIdentifier =
-      nextIdentifier.slice(0, spans[0].start) +
-      replacementName +
-      nextIdentifier.slice(spans[0].end)
-  }
-
-  return nextIdentifier
-}
-
-function escapeSpreadsheetFormulaReferenceName(value: string) {
-  return value.replace(/\\/g, '\\\\').replace(/\]/g, '\\]')
-}
-
-function collectReferenceNameSpans(rawIdentifier: string) {
-  const spans: Array<{ start: number; end: number }> = []
-  let spanStart = -1
-  let insideReference = false
-  let isEscaped = false
-
-  for (let index = 0; index < rawIdentifier.length; index += 1) {
-    const character = rawIdentifier[index]
-    if (!character) {
-      continue
-    }
-
-    if (insideReference && isEscaped) {
-      isEscaped = false
-      continue
-    }
-
-    if (insideReference && character === '\\') {
-      isEscaped = true
-      continue
-    }
-
-    if (character === '[') {
-      insideReference = true
-      spanStart = index + 1
-      continue
-    }
-
-    if (insideReference && character === ']') {
-      if (spanStart >= 0) {
-        spans.push({ start: spanStart, end: index })
-      }
-
-      insideReference = false
-      spanStart = -1
-    }
-  }
-
-  return spans
-}
-
-function collectReferenceRowNumberSpans(rawIdentifier: string) {
-  const spans: Array<{ start: number; end: number }> = []
-  let insideReference = false
-  let isEscaped = false
-
-  for (let index = 0; index < rawIdentifier.length; index += 1) {
-    const character = rawIdentifier[index]
-    if (!character) {
-      continue
-    }
-
-    if (insideReference && isEscaped) {
-      isEscaped = false
-      continue
-    }
-
-    if (insideReference && character === '\\') {
-      isEscaped = true
-      continue
-    }
-
-    if (character === '[') {
-      insideReference = true
-      continue
-    }
-
-    if (character !== ']' || !insideReference) {
-      continue
-    }
-
-    insideReference = false
-    let cursor = index + 1
-    while (cursor < rawIdentifier.length && /\d/.test(rawIdentifier[cursor] ?? '')) {
-      cursor += 1
-    }
-
-    if (cursor > index + 1) {
-      spans.push({ start: index + 1, end: cursor })
-      index = cursor - 1
-    }
-  }
-
-  return spans
-}
-
-function replaceReferenceRowNumberSpans(
-  rawIdentifier: string,
-  rowNumbers: readonly number[],
-) {
-  const spans = collectReferenceRowNumberSpans(rawIdentifier)
-  if (!spans.length) {
-    return rawIdentifier
-  }
-
-  let nextIdentifier = rawIdentifier
-  for (let index = spans.length - 1; index >= 0; index -= 1) {
-    const span = spans[index]
-    if (!span) {
-      continue
-    }
-
-    const replacement = String(rowNumbers[Math.min(index, rowNumbers.length - 1)] ?? rowNumbers[0] ?? '')
-    nextIdentifier =
-      nextIdentifier.slice(0, span.start) +
-      replacement +
-      nextIdentifier.slice(span.end)
-  }
-
-  return nextIdentifier
 }
 
 function resolveFormulaDiagnostics(expression: string) {
@@ -1778,11 +1729,12 @@ function resolveWorkbookSheetReference(
     return fallbackSheet
   }
 
-  for (const candidate of buildSheetReferenceCandidates(sheetReference)) {
+  for (const candidate of buildSpreadsheetFormulaSheetReferenceCandidates(sheetReference)) {
     const normalizedCandidate = candidate.trim().toLowerCase()
     const resolvedSheet =
       workbook.sheetById.get(candidate) ??
       workbook.sheetByLowerId.get(normalizedCandidate) ??
+      workbook.sheetByLowerAlias.get(normalizedCandidate) ??
       workbook.sheetByLowerKey.get(normalizedCandidate) ??
       workbook.sheetByLowerName.get(normalizedCandidate)
 
@@ -1794,7 +1746,7 @@ function resolveWorkbookSheetReference(
   return null
 }
 
-function buildSheetReferenceCandidates(sheetReference: string) {
+export function buildSpreadsheetFormulaSheetReferenceCandidates(sheetReference: string) {
   const trimmedSheetReference = sheetReference.trim()
   const candidates = new Set<string>()
 
@@ -1811,6 +1763,25 @@ function buildSheetReferenceCandidates(sheetReference: string) {
   }
 
   return [...candidates]
+}
+
+export function doesSpreadsheetFormulaSheetMatchReference(
+  sheet: SpreadsheetFormulaSheetIdentity,
+  sheetReference: string | null | undefined,
+) {
+  if (!sheetReference) {
+    return false
+  }
+
+  const normalizedAliases = new Set(
+    [sheet.id, sheet.key, sheet.name, ...(sheet.aliases ?? [])]
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => value.length > 0),
+  )
+
+  return buildSpreadsheetFormulaSheetReferenceCandidates(sheetReference).some((candidate) =>
+    normalizedAliases.has(candidate.trim().toLowerCase()),
+  )
 }
 
 function buildHighlightSegments(
@@ -2015,73 +1986,68 @@ function clampRowIndices(indices: number[], totalRows: number) {
   return indices.filter((index) => index >= 0 && index < totalRows)
 }
 
-function buildColumnLookup(columns: GridColumn[]): ColumnLookupMaps {
-  const keyByLabel = new Map<string, string>()
-  const keyByLowerLabel = new Map<string, string>()
-  const keyByLowerKey = new Map<string, string>()
-
-  for (const column of columns) {
-    keyByLabel.set(column.label, column.key)
-    keyByLowerLabel.set(column.label.trim().toLowerCase(), column.key)
-    keyByLowerKey.set(column.key.trim().toLowerCase(), column.key)
-  }
-
+function buildSpreadsheetFormulaReferenceBoundsResolverSheet(
+  sheet: SpreadsheetFormulaResolvedSheet,
+) {
   return {
-    keyByLabel,
-    keyByLowerLabel,
-    keyByLowerKey,
+    id: sheet.id,
+    columns: sheet.columns.map((column) => ({
+      key: column.key,
+      formulaAlias: resolveGridColumnFormulaReferenceName(column),
+    })),
   }
 }
 
-function resolveReferenceColumnKey(
-  referenceName: string,
-  columns: GridColumn[],
-  lookup: ColumnLookupMaps,
-) {
-  for (const candidate of buildReferenceNameCandidates(referenceName)) {
-    const resolvedKey =
-      lookup.keyByLabel.get(candidate) ??
-      lookup.keyByLowerLabel.get(candidate.trim().toLowerCase()) ??
-      columns.find((column) => column.key === candidate)?.key ??
-      lookup.keyByLowerKey.get(candidate.trim().toLowerCase())
+function resolveSpreadsheetReferenceBoundsForSheet(input: {
+  key: string
+  text: string
+  identifier: string
+  sheetReference: string | null
+  referenceName: string
+  rangeReferenceName: string | null
+  rowSelector: DataGridFormulaRowSelector
+  currentRowIndex: number
+  targetSheet: SpreadsheetFormulaResolvedSheet
+  activeSheetId: string
+  preferredTargetRowIndexes?: readonly number[] | null
+}) {
+  const rowIndexes =
+    input.preferredTargetRowIndexes && input.preferredTargetRowIndexes.length > 0
+      ? clampRowIndices([...input.preferredTargetRowIndexes], input.targetSheet.rows.length)
+      : resolveRowIndices(input.rowSelector, input.currentRowIndex, input.targetSheet.rows.length)
 
-    if (resolvedKey) {
-      return resolvedKey
+  if (!rowIndexes.length) {
+    return {
+      rowIndexes,
+      columnKeys: [] as string[],
+      bounds: null,
     }
   }
 
-  return null
-}
+  const bounds = resolveDataGridSpreadsheetFormulaReferenceBounds(
+    {
+      key: input.key,
+      sheetReference: input.sheetReference,
+      referenceName: input.referenceName,
+      rangeReferenceName: input.rangeReferenceName,
+      targetRowIndexes: rowIndexes,
+    },
+    {
+      activeSheetId: input.activeSheetId,
+      requireActiveSheet: false,
+      resolveSheet: () => buildSpreadsheetFormulaReferenceBoundsResolverSheet(input.targetSheet),
+    },
+  )
 
-function resolveReferenceColumnKeys(
-  referenceName: string,
-  rangeReferenceName: string | null,
-  columns: GridColumn[],
-  lookup: ColumnLookupMaps,
-) {
-  const startKey = resolveReferenceColumnKey(referenceName, columns, lookup)
-  if (!startKey) {
-    return []
+  return {
+    rowIndexes,
+    columnKeys: bounds
+      ? input.targetSheet.columns
+          .slice(bounds.startColumnIndex, bounds.endColumnIndex + 1)
+          .map((column) => column.key)
+      : [],
+    bounds,
   }
-
-  if (!rangeReferenceName || rangeReferenceName === referenceName) {
-    return [startKey]
-  }
-
-  const endKey = resolveReferenceColumnKey(rangeReferenceName, columns, lookup)
-  if (!endKey) {
-    return []
-  }
-
-  const startIndex = columns.findIndex((column) => column.key === startKey)
-  const endIndex = columns.findIndex((column) => column.key === endKey)
-  if (startIndex < 0 || endIndex < 0) {
-    return []
-  }
-
-  const safeStart = Math.min(startIndex, endIndex)
-  const safeEnd = Math.max(startIndex, endIndex)
-  return columns.slice(safeStart, safeEnd + 1).map((column) => column.key)
 }
 
 function buildMissingReferenceMessage(

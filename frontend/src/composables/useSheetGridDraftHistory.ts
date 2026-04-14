@@ -100,6 +100,7 @@ export function useSheetGridDraftHistory(input: {
       columns: payload.columns.map((column) => ({
         key: column.key,
         label: column.label,
+        formula_alias: column.formula_alias,
         data_type: column.data_type,
         column_type: column.column_type,
         width: column.width ?? null,

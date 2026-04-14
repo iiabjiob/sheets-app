@@ -41,6 +41,7 @@ from app.services.workspace.serialization import (
     serialize_workspace,
     workspace_color,
 )
+from app.services.workspace.validation import normalize_and_validate_formula_alias
 
 
 class WorkspaceService:
@@ -343,10 +344,30 @@ class WorkspaceService:
             expression = str(column.get("expression") or "").strip()
             requested_column_type = str(column.get("column_type") or "").strip().lower()
             computed = bool(column.get("computed", False) or expression or requested_column_type == "formula")
+            settings = (
+                deepcopy(column.get("settings"))
+                if isinstance(column.get("settings"), dict)
+                else {}
+            )
+            raw_formula_alias = column.get(
+                "formula_alias",
+                settings.get("formulaAlias", settings.get("formula_alias")),
+            )
+            try:
+                formula_alias = normalize_and_validate_formula_alias(raw_formula_alias)
+            except ValueError as error:
+                raise self._validation_error(str(error)) from error
+
+            if formula_alias:
+                settings["formulaAlias"] = formula_alias
+            else:
+                settings.pop("formulaAlias", None)
+                settings.pop("formula_alias", None)
             normalized_columns.append(
                 {
                     "key": key,
                     "label": label,
+                    "formula_alias": formula_alias,
                     "data_type": str(column.get("data_type") or "text"),
                     "column_type": str(column.get("column_type") or ("formula" if computed else "")),
                     "width": column.get("width"),
@@ -354,7 +375,7 @@ class WorkspaceService:
                     "computed": computed,
                     "expression": expression or None,
                     "options": column.get("options") if isinstance(column.get("options"), list) else [],
-                    "settings": column.get("settings") if isinstance(column.get("settings"), dict) else {},
+                    "settings": settings,
                 }
             )
 

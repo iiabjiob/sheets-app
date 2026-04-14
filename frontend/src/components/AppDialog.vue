@@ -16,6 +16,7 @@ const props = defineProps<{
   loading?: boolean
   initialValue?: string
   eyebrow?: string
+  validator?: ((value: string) => string | null) | null
 }>()
 
 const emit = defineEmits<{
@@ -40,6 +41,17 @@ const isOpen = computed(() => props.modelValue)
 const inputFieldBase = computed(() => slugify(props.title) || 'dialog-name')
 const inputFieldId = computed(() => `${inputFieldBase.value}-input`)
 const inputFieldName = computed(() => `${inputFieldBase.value}-name`)
+const normalizedInputValue = computed(() => inputValue.value.trim())
+const validationMessage = computed(() => {
+  if (!normalizedInputValue.value || !props.validator) {
+    return null
+  }
+
+  return props.validator(normalizedInputValue.value)
+})
+const isSubmitDisabled = computed(
+  () => Boolean(props.loading) || !normalizedInputValue.value || Boolean(validationMessage.value),
+)
 
 watch(isOpen, async (open) => {
   if (open && !dialog.snapshot.value.isOpen) {
@@ -86,11 +98,11 @@ async function closeDialog() {
 }
 
 function submit() {
-  if (!inputValue.value.trim() || props.loading) {
+  if (!normalizedInputValue.value || props.loading || validationMessage.value) {
     return
   }
 
-  emit('submit', inputValue.value.trim())
+  emit('submit', normalizedInputValue.value)
 }
 
 function slugify(value: string) {
@@ -137,6 +149,9 @@ function slugify(value: string) {
               placeholder="Start with something clear"
               @keydown.enter.prevent="submit"
             />
+            <small v-if="validationMessage" class="dialog-field-error">
+              {{ validationMessage }}
+            </small>
           </label>
 
           <footer class="dialog-actions">
@@ -145,7 +160,7 @@ function slugify(value: string) {
             </UiButton>
             <UiButton
               variant="primary"
-              :disabled="loading"
+              :disabled="isSubmitDisabled"
               @click="submit"
             >
               {{ loading ? 'Working...' : confirmLabel }}
@@ -156,3 +171,13 @@ function slugify(value: string) {
     </transition>
   </Teleport>
 </template>
+
+<style scoped>
+.dialog-field-error {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #a33a32;
+}
+</style>

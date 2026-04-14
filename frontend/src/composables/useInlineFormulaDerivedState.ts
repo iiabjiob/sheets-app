@@ -48,6 +48,7 @@ export function useInlineFormulaDerivedState(input: {
         errorMessage: '',
         isIncomplete: false,
         highlightSegments: [],
+        referenceSpans: [],
         referenceOccurrences: [] as SpreadsheetFormulaReferenceOccurrence[],
         referenceTargets: [] as SpreadsheetFormulaReferenceTarget[],
       }
@@ -65,6 +66,7 @@ export function useInlineFormulaDerivedState(input: {
   const inlineFormulaReferenceOccurrences = computed(
     () => inlineFormulaAnalysis.value.referenceOccurrences,
   )
+  const inlineFormulaReferenceSpans = computed(() => inlineFormulaAnalysis.value.referenceSpans)
   const inlineFormulaReferenceTargets = computed(() => inlineFormulaAnalysis.value.referenceTargets)
   const inlineFormulaNormalizedExpression = computed(() =>
     normalizeSpreadsheetFormulaExpression(input.inlineFormulaValue.value),
@@ -149,6 +151,7 @@ export function useInlineFormulaDerivedState(input: {
   return {
     inlineFormulaAnalysis,
     inlineFormulaReferenceOccurrences,
+    inlineFormulaReferenceSpans,
     inlineFormulaReferenceTargets,
     inlineFormulaNormalizedExpression,
     inlineFormulaHasDraftChanges,
