@@ -505,6 +505,62 @@ function clearIndexPaneCanvasRefreshFrame() {
   }
 }
 
+function syncGridChromeCanvasViewports() {
+  const root = gridRootRef.value
+  if (!root) {
+    return
+  }
+
+  const bodyViewport = root.querySelector<HTMLElement>('.grid-body-viewport')
+  const headerViewport = root.querySelector<HTMLElement>('.grid-header-viewport')
+
+  const syncCanvas = (
+    canvasSelector: string,
+    paneSelector: string,
+    viewportHeight: number | null,
+  ) => {
+    const canvas = root.querySelector<HTMLCanvasElement>(canvasSelector)
+    const pane = root.querySelector<HTMLElement>(paneSelector)
+    if (!canvas || !pane) {
+      return
+    }
+
+    const paneWidth = Math.max(0, Math.round(pane.getBoundingClientRect().width))
+    const targetHeight = Math.max(
+      0,
+      Math.round(viewportHeight ?? pane.getBoundingClientRect().height),
+    )
+
+    canvas.style.left = '0px'
+    canvas.style.top = '0px'
+    canvas.style.right = 'auto'
+    canvas.style.bottom = 'auto'
+    canvas.style.width = `${paneWidth}px`
+    canvas.style.height = `${targetHeight}px`
+  }
+
+  syncCanvas(
+    '.grid-header-pane--left > .grid-chrome-canvas',
+    '.grid-header-pane--left',
+    headerViewport?.clientHeight ?? null,
+  )
+  syncCanvas(
+    '.grid-header-pane--right > .grid-chrome-canvas',
+    '.grid-header-pane--right',
+    headerViewport?.clientHeight ?? null,
+  )
+  syncCanvas(
+    '.grid-body-pane--left > .grid-chrome-canvas',
+    '.grid-body-pane--left',
+    bodyViewport?.clientHeight ?? null,
+  )
+  syncCanvas(
+    '.grid-body-pane--right > .grid-chrome-canvas',
+    '.grid-body-pane--right',
+    bodyViewport?.clientHeight ?? null,
+  )
+}
+
 function roundGridGeometryValue(value: number) {
   return Number(value.toFixed(3))
 }
@@ -1113,6 +1169,7 @@ function scheduleIndexPaneCanvasRefresh() {
   clearIndexPaneCanvasRefreshFrame()
   indexPaneCanvasRefreshFrame = window.requestAnimationFrame(() => {
     indexPaneCanvasRefreshFrame = null
+    syncGridChromeCanvasViewports()
     drawIndexPaneCanvas()
     ensureIndexPaneCanvasObserver()
     refreshGridGeometryDiagnosticsSnapshot()
