@@ -34,6 +34,7 @@ export interface SheetSummary {
   icon: string
   kind: string
   row_count: number
+  initial_placeholder_row_budget: number
   updated_at: string
 }
 

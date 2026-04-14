@@ -67,6 +67,7 @@ def serialize_sheet_column(column: SheetColumnModel) -> dict[str, object]:
 
 def serialize_sheet(sheet: SheetModel, *, include_grid: bool = False) -> dict[str, object]:
     active_records = [record for record in sort_records(sheet.records) if not record.archived]
+    raw_initial_placeholder_row_budget = (sheet.config_json or {}).get("initial_placeholder_row_budget")
     data: dict[str, object] = {
         "id": sheet.id,
         "key": sheet.key,
@@ -74,6 +75,10 @@ def serialize_sheet(sheet: SheetModel, *, include_grid: bool = False) -> dict[st
         "icon": "grid" if sheet.kind in {"data", "derived"} else sheet.kind,
         "kind": sheet.kind,
         "row_count": len(active_records),
+        "initial_placeholder_row_budget": max(
+            0,
+            raw_initial_placeholder_row_budget if isinstance(raw_initial_placeholder_row_budget, int) else 0,
+        ),
         "updated_at": sheet.updated_at.isoformat(),
     }
 

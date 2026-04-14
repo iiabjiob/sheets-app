@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { createDataGridSpreadsheetFormulaReferenceDecorations } from '@affino/datagrid-core'
+import {
+  createDataGridSpreadsheetFormulaReferenceDecorations,
+  type DataGridFilterSnapshot,
+  type DataGridUnifiedState,
+} from '@affino/datagrid-core'
 import {
   defineDataGridComponent,
   defineDataGridFilterCellReader,
@@ -286,11 +290,6 @@ const GRID_VIRTUALIZATION = {
   columnOverscan: 1,
 } as const
 
-const GRID_PLACEHOLDER_ROWS = {
-  count: 24,
-  createRowAt: () => createEmptyRow(),
-} satisfies Exclude<DataGridPlaceholderRowsProp<GridRow>, number | null>
-
 const TypedDataGrid = defineDataGridComponent<GridRow>()
 
 const CLIENT_ROW_MODEL_OPTIONS: DataGridAppClientRowModelOptions<GridRow> = {
@@ -323,6 +322,7 @@ const inputRows = ref<GridRow[]>([])
 const inputColumns = ref<SheetGridColumn[]>([])
 const runtimeRows = ref<GridRow[]>([])
 const runtimeColumns = ref<SheetGridColumn[]>([])
+const activeGridState = ref<DataGridUnifiedState<GridRow> | null>(null)
 const dataGridRef = ref<DataGridComponentHandle | null>(null)
 const gridRootRef = ref<HTMLElement | null>(null)
 const gridApi = ref<GridApiLike<GridRow> | null>(null)
@@ -381,6 +381,7 @@ type FormulaReferenceCanvasOverlay = {
 let formulaHighlightObserver: MutationObserver | null = null
 let formulaHighlightRefreshFrame: number | null = null
 let formulaHighlightViewportListenersCleanup: (() => void) | null = null
+let placeholderRowsRestoreFrame: number | null = null
 let indexPaneCanvasObserver: MutationObserver | null = null
 let indexPaneCanvasResizeObserver: ResizeObserver | null = null
 let indexPaneCanvasRefreshFrame: number | null = null
@@ -400,6 +401,13 @@ function clearIndexPaneCanvasRefreshFrame() {
   if (indexPaneCanvasRefreshFrame !== null) {
     window.cancelAnimationFrame(indexPaneCanvasRefreshFrame)
     indexPaneCanvasRefreshFrame = null
+  }
+}
+
+function clearPlaceholderRowsRestoreFrame() {
+  if (placeholderRowsRestoreFrame !== null) {
+    window.cancelAnimationFrame(placeholderRowsRestoreFrame)
+    placeholderRowsRestoreFrame = null
   }
 }
 
@@ -554,6 +562,41 @@ function clearFormulaReferenceCanvas() {
   context.clearRect(0, 0, canvas.width, canvas.height)
 }
 
+function syncOverlayCanvasViewport(
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+) {
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
+  const scaledWidth = Math.max(1, Math.ceil(width * devicePixelRatio))
+  const scaledHeight = Math.max(1, Math.ceil(height * devicePixelRatio))
+  const cssWidth = `${width}px`
+  const cssHeight = `${height}px`
+
+  if (
+    canvas.width !== scaledWidth ||
+    canvas.height !== scaledHeight ||
+    canvas.style.width !== cssWidth ||
+    canvas.style.height !== cssHeight
+  ) {
+    canvas.width = scaledWidth
+    canvas.height = scaledHeight
+    canvas.style.width = cssWidth
+    canvas.style.height = cssHeight
+  }
+
+  context.setTransform(1, 0, 0, 1, 0, 0)
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
+
+  return {
+    devicePixelRatio,
+    scaledWidth,
+    scaledHeight,
+  }
+}
+
 function drawFormulaReferenceCanvas(overlays: readonly FormulaReferenceCanvasOverlay[]) {
   const root = gridRootRef.value
   const canvas = formulaReferenceCanvasRef.value
@@ -567,27 +610,15 @@ function drawFormulaReferenceCanvas(overlays: readonly FormulaReferenceCanvasOve
   }
 
   const rootRect = root.getBoundingClientRect()
-  const width = Math.round(rootRect.width)
-  const height = Math.round(rootRect.height)
+  const width = rootRect.width
+  const height = rootRect.height
 
   if (width <= 0 || height <= 0) {
     context.clearRect(0, 0, canvas.width, canvas.height)
     return
   }
 
-  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
-  const scaledWidth = Math.round(width * devicePixelRatio)
-  const scaledHeight = Math.round(height * devicePixelRatio)
-
-  if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
-    canvas.width = scaledWidth
-    canvas.height = scaledHeight
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-  }
-
-  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
-  context.clearRect(0, 0, width, height)
+  syncOverlayCanvasViewport(canvas, context, width, height)
 
   if (!overlays.length) {
     return
@@ -737,27 +768,15 @@ function drawIndexPaneCanvas() {
   }
 
   const rootRect = root.getBoundingClientRect()
-  const width = Math.round(rootRect.width)
-  const height = Math.round(rootRect.height)
+  const width = rootRect.width
+  const height = rootRect.height
 
   if (width <= 0 || height <= 0) {
     context.clearRect(0, 0, canvas.width, canvas.height)
     return
   }
 
-  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
-  const scaledWidth = Math.round(width * devicePixelRatio)
-  const scaledHeight = Math.round(height * devicePixelRatio)
-
-  if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
-    canvas.width = scaledWidth
-    canvas.height = scaledHeight
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-  }
-
-  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
-  context.clearRect(0, 0, width, height)
+  syncOverlayCanvasViewport(canvas, context, width, height)
 
   const stage =
     root.querySelector<HTMLElement>('.affino-datagrid-app-root') ??
@@ -1009,11 +1028,26 @@ function queueGridHistoryFocusRestore() {
 
 const FORMULA_PLACEHOLDER_ROW_ID_PREFIX = '__datagrid_placeholder__:'
 
+function resolveDocumentPlaceholderRowCount(materializedRowCount: number) {
+  return Math.max(0, placeholderRowBudget.value - Math.max(0, Math.trunc(materializedRowCount)))
+}
+
+function buildPlaceholderRowsConfig(
+  count: number,
+): Exclude<DataGridPlaceholderRowsProp<GridRow>, number | null> | null {
+  const normalizedCount = Math.max(0, Math.trunc(count))
+  if (normalizedCount <= 0) {
+    return null
+  }
+
+  return {
+    count: normalizedCount,
+    createRowAt: () => createEmptyRow(),
+  }
+}
+
 function extendRowsWithFormulaPlaceholders(rows: GridRow[]): GridRow[] {
-  const placeholderCount =
-    typeof GRID_PLACEHOLDER_ROWS.count === 'number' && Number.isFinite(GRID_PLACEHOLDER_ROWS.count)
-      ? Math.max(0, Math.trunc(GRID_PLACEHOLDER_ROWS.count))
-      : 0
+  const placeholderCount = activePlaceholderRowCount.value
   if (placeholderCount <= 0) {
     return rows
   }
@@ -1024,6 +1058,81 @@ function extendRowsWithFormulaPlaceholders(rows: GridRow[]): GridRow[] {
       id: `${FORMULA_PLACEHOLDER_ROW_ID_PREFIX}${rows.length + offset}`,
     })),
   ]
+}
+
+function hasActiveAdvancedFilter(filterModel: DataGridFilterSnapshot | null | undefined) {
+  if (!filterModel) {
+    return false
+  }
+
+  if (filterModel.advancedExpression) {
+    return true
+  }
+
+  return Object.keys(filterModel.advancedFilters ?? {}).length > 0
+}
+
+const shouldDelayPlaceholderRowsRestore = ref(false)
+const materializedGridRowCount = computed(() => {
+  if (runtimeRows.value.length) {
+    return runtimeRows.value.length
+  }
+
+  if (inputRows.value.length) {
+    return inputRows.value.length
+  }
+
+  return props.sheet?.rows.length ?? 0
+})
+const placeholderRowBudget = computed(() => {
+  if (props.sheet?.id === props.sheetId) {
+    return Math.max(0, props.sheet.initial_placeholder_row_budget ?? 0)
+  }
+
+  return Math.max(0, activeFormulaSourceSheet.value?.initial_placeholder_row_budget ?? 0)
+})
+const hasActiveAdvancedGridFilter = computed(() =>
+  hasActiveAdvancedFilter(activeGridState.value?.rows.snapshot.filterModel ?? null),
+)
+const activePlaceholderRowCount = computed(() => {
+  if (hasActiveAdvancedGridFilter.value || shouldDelayPlaceholderRowsRestore.value) {
+    return 0
+  }
+
+  return resolveDocumentPlaceholderRowCount(materializedGridRowCount.value)
+})
+const effectivePlaceholderRows = computed<DataGridPlaceholderRowsProp<GridRow> | null>(() =>
+  buildPlaceholderRowsConfig(activePlaceholderRowCount.value),
+)
+
+function schedulePlaceholderRowsRestore() {
+  clearPlaceholderRowsRestoreFrame()
+  placeholderRowsRestoreFrame = window.requestAnimationFrame(() => {
+    placeholderRowsRestoreFrame = window.requestAnimationFrame(() => {
+      placeholderRowsRestoreFrame = null
+      shouldDelayPlaceholderRowsRestore.value = false
+    })
+  })
+}
+
+function handleGridStateUpdate(state: DataGridUnifiedState<GridRow> | null) {
+  const hadActiveAdvancedFilter = hasActiveAdvancedGridFilter.value
+  activeGridState.value = state
+  const hasActiveFilterNow = hasActiveAdvancedFilter(state?.rows.snapshot.filterModel ?? null)
+
+  if (hasActiveFilterNow) {
+    clearPlaceholderRowsRestoreFrame()
+    shouldDelayPlaceholderRowsRestore.value = true
+    return
+  }
+
+  if (hadActiveAdvancedFilter) {
+    shouldDelayPlaceholderRowsRestore.value = true
+    schedulePlaceholderRowsRestore()
+    return
+  }
+
+  shouldDelayPlaceholderRowsRestore.value = false
 }
 
 const gridRows = computed<GridRow[]>(() => inputRows.value)
@@ -1656,6 +1765,9 @@ watch(
   () => [props.workspaceId, props.sheetId, props.sheet?.updated_at ?? null],
   () => {
     const context = getSheetDraftContext()
+    clearPlaceholderRowsRestoreFrame()
+    activeGridState.value = null
+    shouldDelayPlaceholderRowsRestore.value = false
     resetGridSessionState()
     clearGridHistory()
     inputColumns.value = cloneGridColumns(props.sheet?.columns ?? [])
@@ -1805,6 +1917,7 @@ onBeforeUnmount(() => {
   }
 
   window.removeEventListener('keydown', handleWindowHistoryKeydown, true)
+  clearPlaceholderRowsRestoreFrame()
   clearIndexPaneCanvasRefreshFrame()
   disconnectIndexPaneCanvasViewportListeners()
   disconnectIndexPaneCanvasResizeObserver()
@@ -2094,10 +2207,7 @@ function resolveGridHeaderTarget(event: MouseEvent): GridHeaderTarget | null {
 
 function buildColumnSelectionSnapshots(target: GridHeaderTarget, event: MouseEvent) {
   const rows = readGridRows()
-  const placeholderTailCount =
-    typeof GRID_PLACEHOLDER_ROWS.count === 'number' && Number.isFinite(GRID_PLACEHOLDER_ROWS.count)
-      ? Math.max(0, Math.trunc(GRID_PLACEHOLDER_ROWS.count))
-      : 0
+  const placeholderTailCount = activePlaceholderRowCount.value
   const visualRowCount = rows.length + placeholderTailCount
   const lastRowIndex = visualRowCount - 1
   if (lastRowIndex < 0) {
@@ -4159,7 +4269,7 @@ defineExpose<SheetStageHandle>({
             :key="gridRenderVersion"
             :rows="gridRows"
             :columns="gridColumns"
-            :placeholder-rows="GRID_PLACEHOLDER_ROWS"
+            :placeholder-rows="effectivePlaceholderRows"
             :chrome="gridChrome"
             :theme="workspaceDataGridTheme"
             :history="gridHistory"
@@ -4187,6 +4297,7 @@ defineExpose<SheetStageHandle>({
             @ready="handleGridReady"
             @cell-change="handleGridCellChange"
             @selection-change="handleTypedGridSelectionChange"
+            @update:state="handleGridStateUpdate"
           />
 
           <div

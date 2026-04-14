@@ -49,6 +49,7 @@ class SheetSummary(BaseModel):
     icon: str = "grid"
     kind: str = "data"
     row_count: int = 0
+    initial_placeholder_row_budget: int = 0
     updated_at: str
 
 

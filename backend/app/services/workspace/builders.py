@@ -30,6 +30,9 @@ def default_column_title(index: int) -> str:
     return f"Column {index}"
 
 
+INITIAL_SHEET_PLACEHOLDER_ROW_BUDGET = 50
+
+
 def build_default_column_blueprints() -> list[dict[str, object]]:
     return [
         {
@@ -296,6 +299,10 @@ def build_sheet(
     created_at = timestamp()
     resolved_sheet_id = sheet_id or f"sheet_{uuid4().hex[:8]}"
     resolved_rows = rows if rows is not None else []
+    resolved_config = deepcopy(config_json or {})
+    if config_json is None and rows is None:
+        resolved_config["initial_placeholder_row_budget"] = INITIAL_SHEET_PLACEHOLDER_ROW_BUDGET
+
     sheet = SheetModel(
         id=resolved_sheet_id,
         workbook_id=workbook_id,
@@ -304,7 +311,7 @@ def build_sheet(
         kind=kind,
         source_sheet_id=source_sheet_id,
         position=position,
-        config_json=deepcopy(config_json or {}),
+        config_json=resolved_config,
         created_at=created_at,
         updated_at=created_at,
     )
