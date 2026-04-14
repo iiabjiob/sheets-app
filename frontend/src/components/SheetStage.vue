@@ -800,11 +800,6 @@ function drawIndexPaneCanvas() {
     'var(--datagrid-row-band-striped-bg)',
     'rgba(0, 0, 0, 0)',
   )
-  const rowDividerColor = resolveGridCanvasColor(
-    stage,
-    'var(--datagrid-row-divider-color)',
-    'rgba(188, 196, 191, 1)',
-  )
   const selectionFillColor = resolveGridCanvasColor(
     stage,
     'var(--sheet-grid-index-selection-fill, var(--datagrid-selection-range-bg))',
@@ -880,16 +875,6 @@ function drawIndexPaneCanvas() {
           cellRect.top,
           Math.max(0, cellRect.width - columnDividerSize),
           Math.max(0, cellRect.height - rowDividerSize),
-        )
-      }
-
-      if (rowDividerSize > 0) {
-        context.fillStyle = rowDividerColor
-        context.fillRect(
-          cellRect.left,
-          cellRect.bottom - rowDividerSize,
-          cellRect.width,
-          rowDividerSize,
         )
       }
     })
