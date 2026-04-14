@@ -280,7 +280,7 @@ interface SheetStageHandle {
 const GRID_LINES = {
   body: 'all',
   header: 'columns',
-  pinnedSeparators: true,
+  pinnedSeparators: false,
 } as const
 
 const GRID_VIRTUALIZATION = {
@@ -562,41 +562,6 @@ function clearFormulaReferenceCanvas() {
   context.clearRect(0, 0, canvas.width, canvas.height)
 }
 
-function syncOverlayCanvasViewport(
-  canvas: HTMLCanvasElement,
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-) {
-  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
-  const scaledWidth = Math.max(1, Math.ceil(width * devicePixelRatio))
-  const scaledHeight = Math.max(1, Math.ceil(height * devicePixelRatio))
-  const cssWidth = `${width}px`
-  const cssHeight = `${height}px`
-
-  if (
-    canvas.width !== scaledWidth ||
-    canvas.height !== scaledHeight ||
-    canvas.style.width !== cssWidth ||
-    canvas.style.height !== cssHeight
-  ) {
-    canvas.width = scaledWidth
-    canvas.height = scaledHeight
-    canvas.style.width = cssWidth
-    canvas.style.height = cssHeight
-  }
-
-  context.setTransform(1, 0, 0, 1, 0, 0)
-  context.clearRect(0, 0, canvas.width, canvas.height)
-  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
-
-  return {
-    devicePixelRatio,
-    scaledWidth,
-    scaledHeight,
-  }
-}
-
 function drawFormulaReferenceCanvas(overlays: readonly FormulaReferenceCanvasOverlay[]) {
   const root = gridRootRef.value
   const canvas = formulaReferenceCanvasRef.value
@@ -610,15 +575,27 @@ function drawFormulaReferenceCanvas(overlays: readonly FormulaReferenceCanvasOve
   }
 
   const rootRect = root.getBoundingClientRect()
-  const width = rootRect.width
-  const height = rootRect.height
+  const width = Math.round(rootRect.width)
+  const height = Math.round(rootRect.height)
 
   if (width <= 0 || height <= 0) {
     context.clearRect(0, 0, canvas.width, canvas.height)
     return
   }
 
-  syncOverlayCanvasViewport(canvas, context, width, height)
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
+  const scaledWidth = Math.round(width * devicePixelRatio)
+  const scaledHeight = Math.round(height * devicePixelRatio)
+
+  if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
+    canvas.width = scaledWidth
+    canvas.height = scaledHeight
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+  }
+
+  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
+  context.clearRect(0, 0, width, height)
 
   if (!overlays.length) {
     return
@@ -768,15 +745,27 @@ function drawIndexPaneCanvas() {
   }
 
   const rootRect = root.getBoundingClientRect()
-  const width = rootRect.width
-  const height = rootRect.height
+  const width = Math.round(rootRect.width)
+  const height = Math.round(rootRect.height)
 
   if (width <= 0 || height <= 0) {
     context.clearRect(0, 0, canvas.width, canvas.height)
     return
   }
 
-  syncOverlayCanvasViewport(canvas, context, width, height)
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : Math.max(1, window.devicePixelRatio || 1)
+  const scaledWidth = Math.round(width * devicePixelRatio)
+  const scaledHeight = Math.round(height * devicePixelRatio)
+
+  if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
+    canvas.width = scaledWidth
+    canvas.height = scaledHeight
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+  }
+
+  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
+  context.clearRect(0, 0, width, height)
 
   const stage =
     root.querySelector<HTMLElement>('.affino-datagrid-app-root') ??

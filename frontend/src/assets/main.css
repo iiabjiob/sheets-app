@@ -1300,14 +1300,47 @@ button:disabled {
 
 .sheet-grid-stage__grid .affino-datagrid-app-root,
 .sheet-grid-stage__grid .grid-stage {
-  --datagrid-pinned-pane-separator-size: 1px !important;
-  --datagrid-pinned-pane-separator-color: color-mix(
+  --sheet-grid-pinned-boundary-color: color-mix(
     in srgb,
-    var(--datagrid-column-divider-color) 72%,
-    transparent
-  ) !important;
+    var(--datagrid-column-divider-color) 76%,
+    rgba(44, 59, 51, 0.18)
+  );
   --sheet-grid-index-selection-fill: rgba(31, 143, 82, 0.06);
   --sheet-grid-index-selection-stroke: var(--color-accent);
+}
+
+.sheet-grid-stage__grid .grid-header-pane--left,
+.sheet-grid-stage__grid .grid-body-pane--left {
+  box-shadow: none;
+}
+
+.sheet-grid-stage__grid .grid-header-pane--right,
+.sheet-grid-stage__grid .grid-body-pane--right {
+  box-shadow: none;
+}
+
+.sheet-grid-stage__grid .grid-header-pane--left::after,
+.sheet-grid-stage__grid .grid-body-pane--left::after,
+.sheet-grid-stage__grid .grid-header-pane--right::before,
+.sheet-grid-stage__grid .grid-body-pane--right::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px !important;
+  background: var(--sheet-grid-pinned-boundary-color) !important;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.sheet-grid-stage__grid .grid-header-pane--left::after,
+.sheet-grid-stage__grid .grid-body-pane--left::after {
+  right: 0;
+}
+
+.sheet-grid-stage__grid .grid-header-pane--right::before,
+.sheet-grid-stage__grid .grid-body-pane--right::before {
+  left: 0;
 }
 
 .sheet-grid-stage__index-pane-canvas {
