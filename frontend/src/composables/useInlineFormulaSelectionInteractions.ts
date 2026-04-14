@@ -42,6 +42,7 @@ export function useInlineFormulaSelectionInteractions(input: {
     rowId: string
     rowIndex: number
     columnKey: string
+    toneIndex?: number | null
   } | null>
   inlineFormulaReferenceOccurrences: Ref<readonly SpreadsheetFormulaReferenceOccurrence[]>
   inlineFormulaSelectionReferenceState: Ref<InlineFormulaSelectionReferenceState | null>
@@ -150,12 +151,12 @@ export function useInlineFormulaSelectionInteractions(input: {
   }
 
   function buildFormulaReference(columnKey: string, targetRowIndex: number, currentRowIndex: number) {
-    const columnLabel = input.resolveColumnLabel(columnKey).replace(/\]/g, '\\\]')
+    const columnReferenceName = columnKey.replace(/\\/g, '\\\\').replace(/\]/g, '\\\]')
     if (targetRowIndex === currentRowIndex) {
-      return `[${columnLabel}]@row`
+      return `[${columnReferenceName}]@row`
     }
 
-    return `[${columnLabel}]${targetRowIndex + 1}`
+    return `[${columnReferenceName}]${targetRowIndex + 1}`
   }
 
   function buildFormulaRangeReference(
@@ -164,10 +165,12 @@ export function useInlineFormulaSelectionInteractions(input: {
     startRowIndex: number,
     endRowIndex: number,
   ) {
-    const startColumnLabel = input.resolveColumnLabel(startColumnKey).replace(/\]/g, '\\\]')
-    const endColumnLabel = input.resolveColumnLabel(endColumnKey).replace(/\]/g, '\\\]')
+    const startColumnReferenceName = startColumnKey
+      .replace(/\\/g, '\\\\')
+      .replace(/\]/g, '\\\]')
+    const endColumnReferenceName = endColumnKey.replace(/\\/g, '\\\\').replace(/\]/g, '\\\]')
 
-    return `[${startColumnLabel}]${startRowIndex + 1}:[${endColumnLabel}]${endRowIndex + 1}`
+    return `[${startColumnReferenceName}]${startRowIndex + 1}:[${endColumnReferenceName}]${endRowIndex + 1}`
   }
 
   function resolveFormulaReferenceCaretOffset(reference: string) {

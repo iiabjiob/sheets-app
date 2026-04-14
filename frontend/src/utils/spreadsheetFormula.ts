@@ -43,6 +43,15 @@ export interface SpreadsheetFormulaRowInsertRewriteOptions
   rowCount?: number
 }
 
+export interface SpreadsheetFormulaColumnKeyRenameRewriteOptions
+  extends Pick<
+    SpreadsheetFormulaBuildOptions,
+    'currentSheetId' | 'currentSheetKey' | 'currentSheetName'
+  > {
+  previousColumnKey: string
+  nextColumnKey: string
+}
+
 export interface SpreadsheetFormulaCellResult {
   expression: string
   value: unknown
@@ -259,6 +268,76 @@ export function rewriteSpreadsheetFormulasForRowInsert(
       }
 
       const rewrittenValue = rewriteSpreadsheetFormulaInputForStructuralRowChange(
+        String(cellValue),
+        rewriter,
+      )
+      if (rewrittenValue === cellValue) {
+        continue
+      }
+
+      if (!nextRow) {
+        nextRow = { ...row }
+      }
+
+      nextRow[columnKey] = rewrittenValue
+      didRewriteRows = true
+    }
+
+    return nextRow ?? row
+  })
+
+  return {
+    columns: didRewriteColumns ? rewrittenColumns : columns,
+    rows: didRewriteRows ? rewrittenRows : rows,
+  }
+}
+
+export function rewriteSpreadsheetFormulasForColumnKeyRename(
+  columns: GridColumn[],
+  rows: GridRow[],
+  options: SpreadsheetFormulaColumnKeyRenameRewriteOptions,
+) {
+  const rewriter = createSpreadsheetFormulaColumnKeyRenameRewriter(options)
+  if (!rewriter.previousColumnKey || !rewriter.nextColumnKey) {
+    return {
+      columns,
+      rows,
+    }
+  }
+
+  let didRewriteColumns = false
+  const rewrittenColumns = columns.map((column) => {
+    const normalizedExpression = normalizeSpreadsheetFormulaExpression(column.expression)
+    if (!normalizedExpression) {
+      return column
+    }
+
+    const rewrittenExpression = rewriteSpreadsheetFormulaInputForColumnKeyChange(
+      String(column.expression),
+      rewriter,
+    )
+    const nextExpression = normalizeSpreadsheetFormulaExpression(rewrittenExpression)
+    if (nextExpression === normalizedExpression) {
+      return column
+    }
+
+    didRewriteColumns = true
+    return {
+      ...column,
+      expression: nextExpression,
+    }
+  })
+
+  let didRewriteRows = false
+  const rewrittenRows = rows.map((row) => {
+    let nextRow: GridRow | null = null
+
+    for (const [columnKey, cellValue] of Object.entries(row)) {
+      if (!isSpreadsheetFormulaValue(cellValue)) {
+        continue
+      }
+
+      const rewrittenValue = rewriteSpreadsheetFormulaInputForColumnKeyChange(
         String(cellValue),
         rewriter,
       )
@@ -1093,6 +1172,24 @@ function createSpreadsheetFormulaRowInsertRewriter(
   }
 }
 
+function createSpreadsheetFormulaColumnKeyRenameRewriter(
+  options: SpreadsheetFormulaColumnKeyRenameRewriteOptions,
+) {
+  const previousColumnKey = options.previousColumnKey.trim()
+  const nextColumnKey = options.nextColumnKey.trim()
+
+  return {
+    previousColumnKey,
+    previousColumnKeyLower: previousColumnKey.toLowerCase(),
+    nextColumnKey,
+    currentSheetAliases: buildSpreadsheetFormulaSheetAliasSet([
+      options.currentSheetId,
+      options.currentSheetKey,
+      options.currentSheetName,
+    ]),
+  }
+}
+
 function buildSpreadsheetFormulaSheetAliasSet(values: Array<string | null | undefined>) {
   const aliases = new Set<string>()
 
@@ -1337,6 +1434,96 @@ function rebaseSpreadsheetFormulaInputForRowReorder(
   return `${prefix}${nextExpression}`
 }
 
+function rewriteSpreadsheetFormulaInputForColumnKeyChange(
+  inputValue: string,
+  rewriter: {
+    previousColumnKey: string
+    previousColumnKeyLower: string
+    nextColumnKey: string
+    currentSheetAliases: ReadonlySet<string>
+  },
+) {
+  const normalizedExpression = normalizeSpreadsheetFormulaExpression(inputValue)
+  if (!normalizedExpression) {
+    return inputValue
+  }
+
+  let references: Array<{
+    sheetReference: string | null
+    referenceName: string
+    rangeReferenceName: string | null
+    rowSelector: DataGridFormulaRowSelector
+    span: { start: number; end: number }
+  }> = []
+
+  try {
+    const parsed = parseDataGridFormulaExpression(normalizedExpression, {
+      referenceParserOptions: FORMULA_REFERENCE_OPTIONS,
+    })
+    references = collectAstReferenceNodes(parsed.ast)
+  } catch {
+    return inputValue
+  }
+
+  if (!references.length) {
+    return inputValue
+  }
+
+  const replacements = references
+    .map((reference) => {
+      if (!shouldRewriteReferenceForCurrentSheet(reference.sheetReference, rewriter.currentSheetAliases)) {
+        return null
+      }
+
+      const renamePrimary = doesReferenceNameMatchColumnKey(
+        reference.referenceName,
+        rewriter.previousColumnKeyLower,
+      )
+      const renameRange =
+        reference.rangeReferenceName !== null &&
+        doesReferenceNameMatchColumnKey(reference.rangeReferenceName, rewriter.previousColumnKeyLower)
+      if (!renamePrimary && !renameRange) {
+        return null
+      }
+
+      const rawIdentifier = normalizedExpression.slice(reference.span.start, reference.span.end)
+      const replacement = rewriteReferenceIdentifierColumnNames(rawIdentifier, {
+        nextColumnKey: rewriter.nextColumnKey,
+        renamePrimary,
+        renameRange,
+      })
+      if (replacement === rawIdentifier) {
+        return null
+      }
+
+      return {
+        start: reference.span.start,
+        end: reference.span.end,
+        replacement,
+      }
+    })
+    .filter((entry): entry is { start: number; end: number; replacement: string } => Boolean(entry))
+
+  if (!replacements.length) {
+    return inputValue
+  }
+
+  let nextExpression = normalizedExpression
+  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
+    nextExpression =
+      nextExpression.slice(0, replacement.start) +
+      replacement.replacement +
+      nextExpression.slice(replacement.end)
+  }
+
+  if (nextExpression === normalizedExpression) {
+    return inputValue
+  }
+
+  const prefix = /^(\s*=+\s*)/.exec(inputValue)?.[0] ?? '='
+  return `${prefix}${nextExpression}`
+}
+
 function rewriteAbsoluteReferenceIdentifier(rawIdentifier: string, rowNumber: number) {
   const spans = collectReferenceRowNumberSpans(rawIdentifier)
   if (!spans.length) {
@@ -1361,6 +1548,90 @@ function rewriteAbsoluteWindowReferenceIdentifier(
   }
 
   return replaceReferenceRowNumberSpans(rawIdentifier, [startRowNumber, endRowNumber])
+}
+
+function doesReferenceNameMatchColumnKey(referenceName: string, previousColumnKeyLower: string) {
+  return buildReferenceNameCandidates(referenceName).some(
+    (candidate) => candidate.trim().toLowerCase() === previousColumnKeyLower,
+  )
+}
+
+function rewriteReferenceIdentifierColumnNames(
+  rawIdentifier: string,
+  options: {
+    nextColumnKey: string
+    renamePrimary: boolean
+    renameRange: boolean
+  },
+) {
+  const spans = collectReferenceNameSpans(rawIdentifier)
+  if (!spans.length) {
+    return rawIdentifier
+  }
+
+  const replacementName = escapeSpreadsheetFormulaReferenceName(options.nextColumnKey)
+  let nextIdentifier = rawIdentifier
+
+  if (options.renameRange && spans[1]) {
+    nextIdentifier =
+      nextIdentifier.slice(0, spans[1].start) +
+      replacementName +
+      nextIdentifier.slice(spans[1].end)
+  }
+
+  if (options.renamePrimary && spans[0]) {
+    nextIdentifier =
+      nextIdentifier.slice(0, spans[0].start) +
+      replacementName +
+      nextIdentifier.slice(spans[0].end)
+  }
+
+  return nextIdentifier
+}
+
+function escapeSpreadsheetFormulaReferenceName(value: string) {
+  return value.replace(/\\/g, '\\\\').replace(/\]/g, '\\]')
+}
+
+function collectReferenceNameSpans(rawIdentifier: string) {
+  const spans: Array<{ start: number; end: number }> = []
+  let spanStart = -1
+  let insideReference = false
+  let isEscaped = false
+
+  for (let index = 0; index < rawIdentifier.length; index += 1) {
+    const character = rawIdentifier[index]
+    if (!character) {
+      continue
+    }
+
+    if (insideReference && isEscaped) {
+      isEscaped = false
+      continue
+    }
+
+    if (insideReference && character === '\\') {
+      isEscaped = true
+      continue
+    }
+
+    if (character === '[') {
+      insideReference = true
+      spanStart = index + 1
+      continue
+    }
+
+    if (insideReference && character === ']') {
+      if (spanStart >= 0) {
+        spans.push({ start: spanStart, end: index })
+      }
+
+      insideReference = false
+      spanStart = -1
+    }
+  }
+
+  return spans
 }
 
 function collectReferenceRowNumberSpans(rawIdentifier: string) {

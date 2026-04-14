@@ -234,7 +234,7 @@ button:disabled {
 .workspace-pane-header__eyebrow,
 .workspace-tree__eyebrow,
 .sheet-stage__eyebrow,
-.grid-stage__label,
+.sheet-grid-stage__label,
 .dialog-eyebrow {
   margin: 0;
   font-size: var(--font-size-xs);
@@ -274,7 +274,7 @@ button:disabled {
 .workspace-pane-header__support,
 .sheet-stage__summary,
 .sheet-stage__toolbar-note,
-.grid-stage__meta-block small,
+.sheet-grid-stage__meta-block small,
 .dialog-header p {
   margin: 0;
   font-size: var(--font-size-md);
@@ -619,7 +619,7 @@ button:disabled {
   background: var(--color-surface-subtle);
 }
 
-.grid-stage {
+.sheet-grid-stage {
   min-height: 0;
   height: 100%;
   display: grid;
@@ -628,11 +628,11 @@ button:disabled {
   overflow: hidden;
 }
 
-.grid-stage--with-formula-pane {
+.sheet-grid-stage--with-formula-pane {
   grid-template-columns: minmax(0, 1fr) 336px;
 }
 
-.grid-stage__workspace {
+.sheet-grid-stage__workspace {
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -1231,7 +1231,7 @@ button:disabled {
   color: var(--color-warning);
 }
 
-.grid-stage__meta {
+.sheet-grid-stage__meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1243,17 +1243,17 @@ button:disabled {
   background: var(--color-surface-muted);
 }
 
-.grid-stage__meta-block {
+.sheet-grid-stage__meta-block {
   display: grid;
   gap: 2px;
 }
 
-.grid-stage__meta-block--right {
+.sheet-grid-stage__meta-block--right {
   justify-items: end;
   text-align: right;
 }
 
-.grid-stage__grid {
+.sheet-grid-stage__grid {
   min-height: 0;
   height: 100%;
   display: flex;
@@ -1262,12 +1262,12 @@ button:disabled {
   background: var(--color-surface);
 }
 
-.grid-stage__grid > :not(.grid-stage__selection-summary) {
+.sheet-grid-stage__grid > :not(.sheet-grid-stage__selection-summary) {
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.grid-stage__selection-summary {
+.sheet-grid-stage__selection-summary {
   position: absolute;
   right: 24px;
   bottom: 24px;
@@ -1290,16 +1290,16 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
-.grid-stage__grid .affino-datagrid-app-root,
-.grid-stage__grid .grid-stage,
-.grid-stage__grid .grid-stage::before {
+.sheet-grid-stage__grid .affino-datagrid-app-root,
+.sheet-grid-stage__grid .grid-stage,
+.sheet-grid-stage__grid .grid-stage::before {
   min-height: 0;
   height: 100%;
   border-radius: 0;
 }
 
-.grid-stage__grid .affino-datagrid-app-root,
-.grid-stage__grid .grid-stage {
+.sheet-grid-stage__grid .affino-datagrid-app-root,
+.sheet-grid-stage__grid .grid-stage {
   --datagrid-pinned-pane-separator-size: 1px !important;
   --datagrid-pinned-pane-separator-color: color-mix(
     in srgb,
@@ -1308,10 +1308,10 @@ button:disabled {
   ) !important;
 }
 
-.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root,
-.grid-stage--formula-editor-open .grid-stage__grid .grid-stage,
-.grid-stage--formula-reference-mode .grid-stage__grid .affino-datagrid-app-root,
-.grid-stage--formula-reference-mode .grid-stage__grid .grid-stage {
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root,
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .grid-stage,
+.sheet-grid-stage--formula-reference-mode .sheet-grid-stage__grid .affino-datagrid-app-root,
+.sheet-grid-stage--formula-reference-mode .sheet-grid-stage__grid .grid-stage {
   --datagrid-selection-range-bg: transparent !important;
   --datagrid-selection-border-color: transparent !important;
   --datagrid-selection-overlay-border: transparent !important;
@@ -1320,41 +1320,48 @@ button:disabled {
   --datagrid-selection-active-border: transparent !important;
 }
 
-.grid-stage--formula-editor-open .grid-stage__selection-summary,
-.grid-stage--formula-reference-mode .grid-stage__selection-summary {
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__selection-summary,
+.sheet-grid-stage--formula-reference-mode .sheet-grid-stage__selection-summary {
   display: none;
 }
 
-.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor,
-.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor.grid-cell--selected,
-.grid-stage--formula-editor-open .grid-stage__grid .affino-datagrid-app-root .grid-stage--single-cell-selection .grid-cell--selection-anchor {
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor,
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor.grid-cell--selected,
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root .grid-stage--single-cell-selection .grid-cell--selection-anchor {
   background: transparent !important;
   outline: none !important;
   box-shadow: none !important;
 }
 
-.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--select.grid-cell--selection-anchor:not(.grid-cell--editing)::before,
-.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--select:not(.grid-cell--editing):focus-visible::before,
-.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--date.grid-cell--selection-anchor:not(.grid-cell--editing)::before,
-.grid-stage--formula-editor-open .grid-stage__grid .grid-cell--date:not(.grid-cell--editing):focus-visible::before {
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .grid-cell--select.grid-cell--selection-anchor:not(.grid-cell--editing)::before,
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .grid-cell--select:not(.grid-cell--editing):focus-visible::before,
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .grid-cell--date.grid-cell--selection-anchor:not(.grid-cell--editing)::before,
+.sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .grid-cell--date:not(.grid-cell--editing):focus-visible::before {
   opacity: 0 !important;
 }
 
-.grid-stage__grid .grid-cell--formula-origin {
+.sheet-grid-stage--multi-range-active-cell .sheet-grid-stage__grid .grid-stage:not(.grid-stage--single-cell-selection) .grid-body-shell .grid-cell--selection-anchor {
+  outline: var(--datagrid-selection-stroke-width) solid
+    var(--datagrid-selection-active-border, var(--datagrid-selection-overlay-border));
+  outline-offset: calc(-1 * var(--datagrid-selection-stroke-width));
+  z-index: 2;
+}
+
+.sheet-grid-stage__grid .grid-cell--formula-origin {
   box-shadow: inset 0 0 0 1px var(--color-accent-strong);
 }
 
-.grid-stage__grid .grid-cell--formula-origin .sheet-cell__value {
+.sheet-grid-stage__grid .grid-cell--formula-origin .sheet-cell__value {
   font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
 }
 
-.grid-stage__grid .grid-cell--formula-reference,
-.grid-stage__grid .grid-cell--formula-reference-header {
+.sheet-grid-stage__grid .grid-cell--formula-reference,
+.sheet-grid-stage__grid .grid-cell--formula-reference-header {
   position: relative;
   z-index: 1;
 }
 
-.grid-stage__grid .grid-cell--formula-reference::before {
+.sheet-grid-stage__grid .grid-cell--formula-reference::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -1363,68 +1370,68 @@ button:disabled {
   box-sizing: border-box;
 }
 
-.grid-stage__grid .grid-cell--formula-reference::after {
+.sheet-grid-stage__grid .grid-cell--formula-reference::after {
   content: '';
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle, var(--formula-reference-color, var(--formula-tone-0)) 0 2px, transparent 2.5px) top left / 6px 6px no-repeat,
-    radial-gradient(circle, var(--formula-reference-color, var(--formula-tone-0)) 0 2px, transparent 2.5px) top right / 6px 6px no-repeat,
-    radial-gradient(circle, var(--formula-reference-color, var(--formula-tone-0)) 0 2px, transparent 2.5px) bottom left / 6px 6px no-repeat,
-    radial-gradient(circle, var(--formula-reference-color, var(--formula-tone-0)) 0 2px, transparent 2.5px) bottom right / 6px 6px no-repeat;
+    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) top left / 5px 5px no-repeat,
+    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) top right / 5px 5px no-repeat,
+    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) bottom left / 5px 5px no-repeat,
+    linear-gradient(var(--formula-reference-color, var(--formula-tone-0)) 0 0) bottom right / 5px 5px no-repeat;
   pointer-events: none;
 }
 
-.grid-stage__grid .grid-cell--formula-reference--draggable {
+.sheet-grid-stage__grid .grid-cell--formula-reference--draggable {
   cursor: grab;
 }
 
-.grid-stage__grid .grid-cell--formula-reference--draggable:active,
-.grid-stage__grid .grid-cell--formula-reference--active {
+.sheet-grid-stage__grid .grid-cell--formula-reference--draggable:active,
+.sheet-grid-stage__grid .grid-cell--formula-reference--active {
   cursor: grabbing;
 }
 
-.grid-stage__grid .grid-cell--formula-reference--active::before {
+.sheet-grid-stage__grid .grid-cell--formula-reference--active::before {
   border-style: dashed;
   border-width: 1px;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--formula-reference-color, var(--formula-tone-0)) 18%, transparent);
 }
 
-.grid-stage__grid .grid-cell--formula-reference-header {
+.sheet-grid-stage__grid .grid-cell--formula-reference-header {
   color: var(--formula-reference-color, inherit);
 }
 
-.grid-stage__grid .grid-cell--formula-reference[data-formula-tone="0"],
-.grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="0"] {
+.sheet-grid-stage__grid .grid-cell--formula-reference[data-formula-tone="0"],
+.sheet-grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="0"] {
   --formula-reference-color: var(--formula-tone-0);
 }
 
-.grid-stage__grid .grid-cell--formula-reference[data-formula-tone="1"],
-.grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="1"] {
+.sheet-grid-stage__grid .grid-cell--formula-reference[data-formula-tone="1"],
+.sheet-grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="1"] {
   --formula-reference-color: var(--formula-tone-1);
 }
 
-.grid-stage__grid .grid-cell--formula-reference[data-formula-tone="2"],
-.grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="2"] {
+.sheet-grid-stage__grid .grid-cell--formula-reference[data-formula-tone="2"],
+.sheet-grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="2"] {
   --formula-reference-color: var(--formula-tone-2);
 }
 
-.grid-stage__grid .grid-cell--formula-reference[data-formula-tone="3"],
-.grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="3"] {
+.sheet-grid-stage__grid .grid-cell--formula-reference[data-formula-tone="3"],
+.sheet-grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="3"] {
   --formula-reference-color: var(--formula-tone-3);
 }
 
-.grid-stage__grid .grid-cell--formula-reference[data-formula-tone="4"],
-.grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="4"] {
+.sheet-grid-stage__grid .grid-cell--formula-reference[data-formula-tone="4"],
+.sheet-grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="4"] {
   --formula-reference-color: var(--formula-tone-4);
 }
 
-.grid-stage__grid .grid-cell--formula-reference[data-formula-tone="5"],
-.grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="5"] {
+.sheet-grid-stage__grid .grid-cell--formula-reference[data-formula-tone="5"],
+.sheet-grid-stage__grid .grid-cell--formula-reference-header[data-formula-tone="5"] {
   --formula-reference-color: var(--formula-tone-5);
 }
 
-.grid-stage__empty {
+.sheet-grid-stage__empty {
   display: grid;
   place-items: center;
   gap: 10px;
@@ -1546,36 +1553,36 @@ button:disabled {
   opacity: 1;
 }
 
-.grid-stage__grid .datagrid-app-toolbar__button {
+.sheet-grid-stage__grid .datagrid-app-toolbar__button {
   transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
 
-.grid-stage__grid .datagrid-app-toolbar__button:focus {
+.sheet-grid-stage__grid .datagrid-app-toolbar__button:focus {
   outline: none;
   box-shadow: none;
 }
 
-.grid-stage__grid .datagrid-app-toolbar__button:focus-visible {
+.sheet-grid-stage__grid .datagrid-app-toolbar__button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 1px rgba(31, 143, 82, 0.14);
 }
 
-.grid-stage__grid .cell-editor-control,
-.grid-stage__grid .cell-editor-input {
+.sheet-grid-stage__grid .cell-editor-control,
+.sheet-grid-stage__grid .cell-editor-input {
   color: var(--color-text-strong);
   caret-color: var(--color-text-strong);
 }
 
-.grid-stage__grid .datagrid-overlay-drag-handle {
+.sheet-grid-stage__grid .datagrid-overlay-drag-handle {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.grid-stage__grid .datagrid-column-menu__item--submenu {
+.sheet-grid-stage__grid .datagrid-column-menu__item--submenu {
   font-weight: 600;
 }
 
-.grid-stage__grid .datagrid-column-menu__item--submenu .ui-submenu-arrow {
+.sheet-grid-stage__grid .datagrid-column-menu__item--submenu .ui-submenu-arrow {
   color: var(--color-text-muted);
   opacity: 1;
   font-size: 11px;
@@ -2011,7 +2018,7 @@ button:disabled {
     min-height: 0;
   }
 
-  .grid-stage--with-formula-pane {
+  .sheet-grid-stage--with-formula-pane {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) auto;
   }
@@ -2088,7 +2095,7 @@ button:disabled {
   .sheet-stage__header,
   .sheet-stage__header-actions,
   .sheet-stage__toolbar,
-  .grid-stage__meta,
+  .sheet-grid-stage__meta,
   .formula-pane__header,
   .formula-pane__label-row,
   .formula-pane__references-header,
@@ -2110,7 +2117,7 @@ button:disabled {
     width: 100%;
   }
 
-  .grid-stage--with-formula-pane {
+  .sheet-grid-stage--with-formula-pane {
     width: 100%;
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) auto;
@@ -2120,7 +2127,7 @@ button:disabled {
     max-height: none;
   }
 
-  .grid-stage__meta-block--right {
+  .sheet-grid-stage__meta-block--right {
     width: 100%;
     justify-items: start;
     text-align: left;
