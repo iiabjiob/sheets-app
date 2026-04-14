@@ -3484,6 +3484,9 @@ function resolveRenderedCellState(
         ? String(row.id)
         : null
   const rawValue = row?.[columnKey]
+  const hasOwnCellValue = Boolean(
+    row && Object.prototype.hasOwnProperty.call(row, columnKey),
+  )
   const formulaResult =
     resolvedRowId !== null
       ? formulaCellResults.value.get(buildSpreadsheetFormulaCellKey(resolvedRowId, columnKey)) ?? null
@@ -3525,11 +3528,13 @@ function resolveRenderedCellState(
   }
 
   return {
-    value: deferredFormulaResult?.value ?? fallbackValue,
+    value: deferredFormulaResult?.value ?? (hasOwnCellValue ? fallbackValue : null),
     displayValue:
       deferredFormulaResult?.displayValue ??
-      fallbackDisplayValue ??
-      (fallbackValue === null || fallbackValue === undefined ? '' : String(fallbackValue)),
+      (hasOwnCellValue
+        ? fallbackDisplayValue ??
+          (fallbackValue === null || fallbackValue === undefined ? '' : String(fallbackValue))
+        : ''),
     error: deferredFormulaResult?.error ?? null,
   }
 }
@@ -3640,7 +3645,11 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
 
   return {
     ...baseColumn,
-    cellRenderer: ({ row, rowNode, displayValue, value }) => {
+    cellRenderer: ({ row, rowNode, displayValue, value, surface }) => {
+      if (surface.kind === 'placeholder') {
+        return h('span', { class: 'sheet-cell__value sheet-cell__value--placeholder' }, '')
+      }
+
       const cellState = resolveRenderedCellState(
         rowNode.rowId,
         row as GridRow | undefined,

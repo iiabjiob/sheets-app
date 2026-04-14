@@ -58,8 +58,12 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
   const activeSheet = ref<SheetDetail | null>(null)
   const activeWorkbookSheets = ref<SheetDetail[]>([])
   const isBootstrapping = ref(false)
+  const isLoadingSheet = ref(false)
+  const loadingWorkspaceId = ref<string | null>(null)
+  const loadingSheetId = ref<string | null>(null)
   const isMutating = ref(false)
   const errorMessage = ref<string | null>(null)
+  let activeSheetLoadRequestToken = 0
 
   const activeWorkspace = computed(
     () => workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) ?? null,
@@ -126,15 +130,33 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
 
   async function loadSheet(workspaceId: string, sheetId: string) {
     errorMessage.value = null
+    const requestToken = ++activeSheetLoadRequestToken
+    isLoadingSheet.value = true
+    loadingWorkspaceId.value = workspaceId
+    loadingSheetId.value = sheetId
 
     try {
       const payload = await fetchSheetDocument(workspaceId, sheetId)
+      if (requestToken !== activeSheetLoadRequestToken) {
+        return
+      }
+
       activeWorkspaceId.value = workspaceId
       activeSheetId.value = sheetId
       activeSheet.value = payload.sheet
       activeWorkbookSheets.value = payload.workbook.sheets
     } catch (error) {
+      if (requestToken !== activeSheetLoadRequestToken) {
+        return
+      }
+
       errorMessage.value = error instanceof Error ? error.message : 'Unable to load sheet.'
+    } finally {
+      if (requestToken === activeSheetLoadRequestToken) {
+        isLoadingSheet.value = false
+        loadingWorkspaceId.value = null
+        loadingSheetId.value = null
+      }
     }
   }
 
@@ -441,6 +463,9 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
     activeSheetId.value = null
     activeSheet.value = null
     activeWorkbookSheets.value = []
+    isLoadingSheet.value = false
+    loadingWorkspaceId.value = null
+    loadingSheetId.value = null
     errorMessage.value = null
   }
 
@@ -458,8 +483,11 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
     errorMessage,
     hasData,
     isBootstrapping,
+    isLoadingSheet,
     isMutating,
     loadSheet,
+    loadingSheetId,
+    loadingWorkspaceId,
     moveSheet,
     moveWorkspace,
     removeSheet,

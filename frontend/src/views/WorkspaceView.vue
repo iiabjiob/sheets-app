@@ -12,7 +12,7 @@ import WorkspaceTree from '@/components/WorkspaceTree.vue'
 import { useUnsavedChangesPrompt } from '@/composables/useUnsavedChangesPrompt'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspacesStore } from '@/stores/workspaces'
-import type { GridColumn, SheetDetail, SheetGridUpdateInput } from '@/types/workspace'
+import type { GridColumn, SheetDetail, SheetGridUpdateInput, SheetSummary } from '@/types/workspace'
 import { resolveGridColumnFormulaReferenceName } from '@/utils/spreadsheetColumnModel'
 import { rewriteSpreadsheetFormulasForColumnReferenceNameRename } from '@/utils/spreadsheetFormula'
 
@@ -65,7 +65,12 @@ const activeWorkspaceDescription = computed(
 )
 const currentUserName = computed(() => authStore.currentUser?.full_name ?? authStore.currentUser?.email ?? 'Account')
 const activeWorkspaceColor = computed(() => workspacesStore.activeWorkspace?.color ?? '#1f8f52')
-const activeSheetName = computed(() => workspacesStore.activeSheet?.name ?? 'No sheet selected')
+const activeSheetSummary = computed(() =>
+  workspacesStore.activeWorkspace?.sheets.find((sheet) => sheet.id === workspacesStore.activeSheetId) ?? null,
+)
+const activeSheetName = computed(
+  () => workspacesStore.activeSheet?.name ?? activeSheetSummary.value?.name ?? 'No sheet selected',
+)
 const renameWorkspaceInitialValue = computed(
   () =>
     workspacesStore.workspaces.find((workspace) => workspace.id === renameWorkspaceTargetId.value)?.name ??
@@ -145,6 +150,28 @@ const saveStatusLabel = computed(() => {
 
   return hasUnsavedGridChanges.value ? 'Unsaved changes' : 'All changes saved'
 })
+
+function resolveSheetSummary(workspaceId: string | null, sheetId: string | null): SheetSummary | null {
+  if (!workspaceId || !sheetId) {
+    return null
+  }
+
+  return (
+    workspacesStore.workspaces
+      .find((workspace) => workspace.id === workspaceId)
+      ?.sheets.find((sheet) => sheet.id === sheetId) ?? null
+  )
+}
+
+const loadingSheetSummary = computed(() =>
+  resolveSheetSummary(workspacesStore.loadingWorkspaceId, workspacesStore.loadingSheetId),
+)
+const isSheetTransitionLoading = computed(
+  () => workspacesStore.isLoadingSheet && Boolean(workspacesStore.loadingSheetId),
+)
+const sheetLoadingLabel = computed(
+  () => loadingSheetSummary.value?.name ?? activeSheetSummary.value?.name ?? activeSheetName.value,
+)
 
 interface ColumnReferenceRenameOperation {
   previousReferenceName: string
@@ -712,24 +739,54 @@ function asNumber(value: unknown) {
     />
 
     <main class="workspace-shell__body">
-      <SheetStage
-        ref="sheetStageRef"
-        :workspace-id="workspacesStore.activeWorkspaceId"
-        :workspace-name="activeWorkspaceName"
-        :workspace-description="activeWorkspaceDescription"
-        :workspace-color="activeWorkspaceColor"
-        :sheet-id="workspacesStore.activeSheetId"
-        :sheet-name="activeSheetName"
-        :sheet="workspacesStore.activeSheet"
-        :workbook-sheets="workspacesStore.activeWorkbookSheets"
-        :has-unsaved-changes="hasUnsavedGridChanges"
-        :saving-changes="isSavingGrid"
-        :save-status-label="saveStatusLabel"
-        @create-workspace="workspaceDialogOpen = true"
-        @draft-change="handleSheetGridDraftChange"
-        @dirty-change="handleSheetGridDirtyChange"
-        @save="saveActiveSheetDraft"
-      />
+      <div
+        class="workspace-stage-frame"
+        :class="{ 'workspace-stage-frame--loading': isSheetTransitionLoading }"
+      >
+        <SheetStage
+          ref="sheetStageRef"
+          :workspace-id="workspacesStore.activeWorkspaceId"
+          :workspace-name="activeWorkspaceName"
+          :workspace-description="activeWorkspaceDescription"
+          :workspace-color="activeWorkspaceColor"
+          :sheet-id="workspacesStore.activeSheetId"
+          :sheet-name="activeSheetName"
+          :sheet="workspacesStore.activeSheet"
+          :workbook-sheets="workspacesStore.activeWorkbookSheets"
+          :has-unsaved-changes="hasUnsavedGridChanges"
+          :saving-changes="isSavingGrid"
+          :save-status-label="saveStatusLabel"
+          @create-workspace="workspaceDialogOpen = true"
+          @draft-change="handleSheetGridDraftChange"
+          @dirty-change="handleSheetGridDirtyChange"
+          @save="saveActiveSheetDraft"
+        />
+
+        <div
+          v-if="isSheetTransitionLoading"
+          class="workspace-stage-loading"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div class="workspace-stage-loading__panel">
+            <span class="workspace-stage-loading__eyebrow">Loading sheet</span>
+            <strong class="workspace-stage-loading__title">{{ sheetLoadingLabel }}</strong>
+            <span class="workspace-stage-loading__subtitle">Preparing grid, formulas, and workbook context.</span>
+
+            <div class="workspace-stage-loading__bar" aria-hidden="true">
+              <span class="workspace-stage-loading__bar-fill" />
+            </div>
+
+            <div class="workspace-stage-loading__skeleton" aria-hidden="true">
+              <span class="workspace-stage-loading__skeleton-line workspace-stage-loading__skeleton-line--headline" />
+              <span class="workspace-stage-loading__skeleton-line workspace-stage-loading__skeleton-line--wide" />
+              <span class="workspace-stage-loading__skeleton-line workspace-stage-loading__skeleton-line--mid" />
+              <span class="workspace-stage-loading__skeleton-line workspace-stage-loading__skeleton-line--wide" />
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
 
     <UnsavedChangesDialog
@@ -783,3 +840,135 @@ function asNumber(value: unknown) {
     />
   </div>
 </template>
+
+<style scoped>
+.workspace-stage-frame {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-stage-frame :deep(.sheet-stage) {
+  height: 100%;
+}
+
+.workspace-stage-frame--loading :deep(.sheet-stage) {
+  filter: saturate(0.92) blur(1.5px);
+  transform: scale(0.997);
+  opacity: 0.72;
+  transition:
+    opacity 160ms ease,
+    filter 160ms ease,
+    transform 160ms ease;
+}
+
+.workspace-stage-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    linear-gradient(180deg, rgba(246, 248, 252, 0.62), rgba(246, 248, 252, 0.78)),
+    radial-gradient(circle at top, rgba(31, 143, 82, 0.1), transparent 48%);
+  backdrop-filter: blur(6px);
+}
+
+.workspace-stage-loading__panel {
+  width: min(460px, calc(100% - 16px));
+  display: grid;
+  gap: 10px;
+  padding: 22px 22px 18px;
+  border: 1px solid rgba(47, 60, 54, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 20px 48px rgba(34, 44, 39, 0.12);
+}
+
+.workspace-stage-loading__eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-soft);
+}
+
+.workspace-stage-loading__title {
+  font-size: 22px;
+  line-height: 1.1;
+  color: var(--color-text-strong);
+}
+
+.workspace-stage-loading__subtitle {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-soft);
+}
+
+.workspace-stage-loading__bar {
+  position: relative;
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(31, 143, 82, 0.12);
+}
+
+.workspace-stage-loading__bar-fill {
+  position: absolute;
+  inset: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(31, 143, 82, 0.2), rgba(31, 143, 82, 0.9), rgba(31, 143, 82, 0.2));
+  animation: workspace-stage-loading-slide 1.1s ease-in-out infinite;
+}
+
+.workspace-stage-loading__skeleton {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.workspace-stage-loading__skeleton-line {
+  display: block;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(23, 31, 27, 0.06), rgba(23, 31, 27, 0.14), rgba(23, 31, 27, 0.06));
+  background-size: 220% 100%;
+  animation: workspace-stage-loading-shimmer 1.25s linear infinite;
+}
+
+.workspace-stage-loading__skeleton-line--headline {
+  width: 48%;
+  height: 14px;
+}
+
+.workspace-stage-loading__skeleton-line--wide {
+  width: 100%;
+}
+
+.workspace-stage-loading__skeleton-line--mid {
+  width: 74%;
+}
+
+@keyframes workspace-stage-loading-slide {
+  0% {
+    transform: translateX(-140%);
+  }
+
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@keyframes workspace-stage-loading-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+</style>
