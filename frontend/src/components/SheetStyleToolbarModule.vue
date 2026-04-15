@@ -144,7 +144,6 @@ onBeforeUnmount(() => {
       type="button"
       class="datagrid-app-toolbar__button sheet-style-toolbar-module__trigger"
       data-datagrid-toolbar-action="sheet-style-panel"
-      :aria-expanded="isOpen ? 'true' : 'false'"
       :disabled="!hasSelection"
       v-bind="popoverController.getTriggerProps()"
     >
