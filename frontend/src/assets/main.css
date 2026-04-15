@@ -1307,6 +1307,9 @@ button:disabled {
   );
   --sheet-grid-index-selection-fill: rgba(31, 143, 82, 0.06);
   --sheet-grid-index-selection-stroke: var(--color-accent);
+  --datagrid-selection-range-bg: transparent;
+  --datagrid-selection-overlay-fill-bg: transparent;
+  --datagrid-selection-overlay-move-bg: transparent;
 }
 
 .sheet-grid-stage__grid .grid-header-pane--left,
@@ -1363,6 +1366,11 @@ button:disabled {
 
 .sheet-grid-stage__grid .datagrid-stage__row-index-cell.grid-cell--index-selected::before {
   display: none;
+}
+
+.sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor,
+.sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor.grid-cell--selected {
+  background: transparent !important;
 }
 
 .sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root,

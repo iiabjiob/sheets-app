@@ -94,6 +94,7 @@ def serialize_sheet(sheet: SheetModel, *, include_grid: bool = False) -> dict[st
             row_payload(record, writable_column_keys=writable_column_keys)
             for record in active_records
         ]
+        data["styles"] = deepcopy(sheet.styles_json or [])
 
     return data
 

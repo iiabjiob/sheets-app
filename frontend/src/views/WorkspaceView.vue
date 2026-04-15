@@ -208,6 +208,10 @@ function cloneGridPayload(payload: SheetGridUpdateInput): SheetGridUpdateInput {
       settings: { ...column.settings },
     })),
     rows: payload.rows.map((row) => ({ ...row })),
+    styles: payload.styles.map((rule) => ({
+      range: { ...rule.range },
+      style: { ...rule.style },
+    })),
   }
 }
 
@@ -259,6 +263,7 @@ async function syncCrossSheetColumnReferenceRenames(
     await workspacesStore.syncSheetGrid(workspaceId, workbookSheet.id, cloneGridPayload({
       columns: nextColumns,
       rows: nextRows,
+      styles: workbookSheet.styles,
     }))
   }
 }

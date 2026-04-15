@@ -3,9 +3,12 @@ from app.schemas.common import MoveRequest
 from app.schemas.documents import SheetDocumentResponse
 from app.schemas.sheets import (
 	GridColumn,
+	SheetCellStyle,
 	SheetCreateRequest,
 	SheetDetail,
 	SheetGridUpdateRequest,
+	SheetStyleRange,
+	SheetStyleRule,
 	SheetSummary,
 	SheetUpdateRequest,
 )
@@ -20,6 +23,7 @@ __all__ = [
 	"AuthSessionResponse",
 	"AuthUserResponse",
 	"GridColumn",
+	"SheetCellStyle",
 	"LoginRequest",
 	"MoveRequest",
 	"RegisterRequest",
@@ -27,6 +31,8 @@ __all__ = [
 	"SheetDetail",
 	"SheetDocumentResponse",
 	"SheetGridUpdateRequest",
+	"SheetStyleRange",
+	"SheetStyleRule",
 	"SheetSummary",
 	"SheetUpdateRequest",
 	"WorkspaceCollectionResponse",

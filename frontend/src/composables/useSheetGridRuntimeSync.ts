@@ -1,5 +1,7 @@
 import { ref, type Ref } from 'vue'
 
+import type { SheetStyleRule } from '@/types/workspace'
+
 type GridRow = Record<string, unknown>
 
 interface GridSourceRowNode {
@@ -33,8 +35,10 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
   gridRowModel: Ref<GridEditableRowModel | null>
   runtimeRows: Ref<TRow[]>
   runtimeColumns: Ref<TColumn[]>
+  runtimeStyles: Ref<SheetStyleRule[]>
   inputRows: Ref<TRow[]>
   inputColumns: Ref<TColumn[]>
+  inputStyles: Ref<SheetStyleRule[]>
   gridSelectionSnapshot: Ref<GridSelectionSnapshotLike | null>
   gridSelectionAggregatesLabel: Ref<string>
   committedGridPayloadHash: Ref<string>
@@ -67,11 +71,16 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
   } | null
   readGridColumns: () => TColumn[]
   readGridRows: () => TRow[]
+  readGridStyles: () => SheetStyleRule[]
+  cloneGridColumns: (columns: TColumn[]) => TColumn[]
   cloneGridRows: (rows: TRow[]) => TRow[]
-  serializeGridPayload: (payload: { columns: TColumn[]; rows: TRow[] }) => string
-  scheduleDraftChange: (columns?: TColumn[], rows?: TRow[]) => void
+  cloneGridStyles: (styles: SheetStyleRule[]) => SheetStyleRule[]
+  serializeGridPayload: (payload: { columns: TColumn[]; rows: TRow[]; styles: SheetStyleRule[] }) => string
+  scheduleDraftChange: (columns?: TColumn[], rows?: TRow[], styles?: SheetStyleRule[]) => void
   scheduleFormulaCellRefresh: () => void
   rebaseRowsAfterReorder: (previousRows: TRow[], nextRows: TRow[]) => TRow[]
+  rebaseGridStylesAfterRowChange: (previousRows: TRow[], nextRows: TRow[]) => SheetStyleRule[]
+  rebaseGridStylesAfterColumnChange: (previousColumns: TColumn[], nextColumns: TColumn[]) => SheetStyleRule[]
   isEditableRowModel: (value: unknown) => value is GridEditableRowModel
   gridRootRef: Ref<HTMLElement | null>
 }) {
@@ -188,6 +197,7 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
       input.committedGridPayloadHash.value = input.serializeGridPayload({
         columns: hydratedColumns,
         rows: hydratedRows,
+        styles: input.readGridStyles(),
       })
     }
     gridDisposers.value = [
@@ -202,6 +212,7 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
   }
 
   function handleGridRowsChanged() {
+    const previousColumns = input.readGridColumns()
     const previousRows = input.cloneGridRows(
       input.runtimeRows.value.length ? input.runtimeRows.value : input.inputRows.value,
     )
@@ -235,20 +246,30 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
       nextRows = rebasedRows
     }
 
+    const nextStyles = input.rebaseGridStylesAfterRowChange(previousRows, nextRows)
     input.runtimeRows.value = input.cloneGridRows(nextRows)
+    input.runtimeStyles.value = input.cloneGridStyles(nextStyles)
+    input.inputStyles.value = input.cloneGridStyles(nextStyles)
     syncGridSelectionAggregatesLabel()
     scheduleGridEditorStateSync()
-    input.scheduleDraftChange(input.readGridColumns(), nextRows)
+    input.scheduleDraftChange(previousColumns, nextRows, nextStyles)
     input.scheduleFormulaCellRefresh()
     scheduleInlineFormulaSync()
     input.scheduleCellHistorySync()
   }
 
   function handleGridColumnsChanged() {
-    input.runtimeColumns.value = input.readGridColumns()
+    const previousColumns = input.cloneGridColumns(
+      input.runtimeColumns.value.length ? input.runtimeColumns.value : input.inputColumns.value,
+    )
+    const nextColumns = input.readGridColumns()
+    const nextStyles = input.rebaseGridStylesAfterColumnChange(previousColumns, nextColumns)
+    input.runtimeColumns.value = nextColumns
+    input.runtimeStyles.value = input.cloneGridStyles(nextStyles)
+    input.inputStyles.value = input.cloneGridStyles(nextStyles)
     syncGridSelectionAggregatesLabel()
     scheduleGridEditorStateSync()
-    input.scheduleDraftChange()
+    input.scheduleDraftChange(nextColumns, input.readGridRows(), nextStyles)
     input.scheduleFormulaCellRefresh()
     scheduleInlineFormulaSync()
     input.scheduleCellHistorySync()

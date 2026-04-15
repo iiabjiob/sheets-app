@@ -27,6 +27,37 @@ export interface GridColumn {
   settings: Record<string, unknown>
 }
 
+export type SheetHorizontalAlign = 'left' | 'center' | 'right'
+export type SheetVerticalAlign = 'top' | 'middle' | 'bottom'
+export type SheetWrapMode = 'overflow' | 'clip' | 'wrap'
+
+export interface SheetStyleRange {
+  start_row: number
+  end_row: number
+  start_column: number
+  end_column: number
+}
+
+export interface SheetCellStyle {
+  font_family?: string | null
+  font_size?: number | null
+  bold?: boolean | null
+  italic?: boolean | null
+  underline?: boolean | null
+  strikethrough?: boolean | null
+  text_color?: string | null
+  background_color?: string | null
+  horizontal_align?: SheetHorizontalAlign | null
+  vertical_align?: SheetVerticalAlign | null
+  wrap_mode?: SheetWrapMode | null
+  number_format?: string | null
+}
+
+export interface SheetStyleRule {
+  range: SheetStyleRange
+  style: SheetCellStyle
+}
+
 export interface SheetSummary {
   id: string
   key: string
@@ -50,6 +81,7 @@ export interface WorkspaceSummary {
 export interface SheetDetail extends SheetSummary {
   columns: GridColumn[]
   rows: Record<string, unknown>[]
+  styles: SheetStyleRule[]
 }
 
 export interface SheetWorkbookContext {
@@ -59,6 +91,7 @@ export interface SheetWorkbookContext {
 export interface SheetGridUpdateInput {
   columns: GridColumn[]
   rows: Record<string, unknown>[]
+  styles: SheetStyleRule[]
 }
 
 export interface SheetCellHistoryActor {

@@ -1,4 +1,4 @@
-import type { GridColumn as SheetGridColumn } from '@/types/workspace'
+import type { GridColumn as SheetGridColumn, SheetStyleRule } from '@/types/workspace'
 
 export type GridRow = Record<string, unknown>
 
@@ -63,4 +63,5 @@ export interface FormulaEditorState {
 export interface GridHistorySnapshot {
   columns: SheetGridColumn[]
   rows: GridRow[]
+  styles: SheetStyleRule[]
 }

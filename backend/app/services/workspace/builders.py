@@ -312,6 +312,7 @@ def build_sheet(
         source_sheet_id=source_sheet_id,
         position=position,
         config_json=resolved_config,
+        styles_json=[],
         created_at=created_at,
         updated_at=created_at,
     )
@@ -365,6 +366,7 @@ def clone_sheet(
         source_sheet_id=None,
         position=position,
         config_json=deepcopy(source.config_json or {}),
+        styles_json=deepcopy(source.styles_json or []),
         created_at=created_at,
         updated_at=created_at,
     )

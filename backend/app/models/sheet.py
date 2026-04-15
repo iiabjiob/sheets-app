@@ -35,6 +35,7 @@ class SheetModel(Base):
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    styles_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 

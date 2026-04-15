@@ -2,7 +2,11 @@ import { ref, type Ref } from 'vue'
 import type { DataGridHistoryProp, DataGridTableStageHistoryAdapter } from '@affino/datagrid-vue-app'
 
 import type { GridHistorySnapshot } from '@/composables/inlineFormulaTypes'
-import type { GridColumn as SheetGridColumn, SheetGridUpdateInput } from '@/types/workspace'
+import type {
+  GridColumn as SheetGridColumn,
+  SheetGridUpdateInput,
+  SheetStyleRule,
+} from '@/types/workspace'
 
 type GridRow = Record<string, unknown>
 
@@ -21,8 +25,10 @@ export function useSheetGridDraftHistory(input: {
   sheetId: Ref<string | null>
   inputRows: Ref<GridRow[]>
   inputColumns: Ref<SheetGridColumn[]>
+  inputStyles: Ref<SheetStyleRule[]>
   runtimeRows: Ref<GridRow[]>
   runtimeColumns: Ref<SheetGridColumn[]>
+  runtimeStyles: Ref<SheetStyleRule[]>
   committedGridPayloadHash: Ref<string>
   gridRenderVersion: Ref<number>
   preserveCommittedHashOnNextGridReady: Ref<boolean>
@@ -33,8 +39,10 @@ export function useSheetGridDraftHistory(input: {
   queueGridFocusRestore?: () => void
   readGridRows: () => GridRow[]
   readGridColumns: () => SheetGridColumn[]
+  readGridStyles: () => SheetStyleRule[]
   cloneGridRows: (rows: GridRow[]) => GridRow[]
   cloneGridColumns: (columns: SheetGridColumn[]) => SheetGridColumn[]
+  cloneGridStyles: (styles: SheetStyleRule[]) => SheetStyleRule[]
   normalizeFormulaExpression: (value: unknown) => string | null
   createClientRowId: () => string
 }) {
@@ -114,10 +122,23 @@ export function useSheetGridDraftHistory(input: {
         id: String(row.id ?? ''),
         values: writableColumns.map((column) => stableSerializeValue(row[column.key])),
       })),
+      styles: payload.styles.map((rule) => ({
+        range: {
+          start_row: rule.range.start_row,
+          end_row: rule.range.end_row,
+          start_column: rule.range.start_column,
+          end_column: rule.range.end_column,
+        },
+        style: stableSerializeValue(rule.style),
+      })),
     })
   }
 
-  function buildDraftPayload(columns: SheetGridColumn[], rows: GridRow[]): SheetGridUpdateInput | null {
+  function buildDraftPayload(
+    columns: SheetGridColumn[],
+    rows: GridRow[],
+    styles: SheetStyleRule[],
+  ): SheetGridUpdateInput | null {
     if (!input.sheetId.value) {
       return null
     }
@@ -126,13 +147,14 @@ export function useSheetGridDraftHistory(input: {
     const payload = {
       columns: input.cloneGridColumns(columns),
       rows: input.cloneGridRows(normalizedRows),
+      styles: input.cloneGridStyles(styles),
     }
 
     return serializeGridPayload(payload) === input.committedGridPayloadHash.value ? null : payload
   }
 
   function getCurrentDraft(): SheetGridUpdateInput | null {
-    return buildDraftPayload(input.readGridColumns(), input.readGridRows())
+    return buildDraftPayload(input.readGridColumns(), input.readGridRows(), input.readGridStyles())
   }
 
   function clearSyncTimer() {
@@ -150,18 +172,23 @@ export function useSheetGridDraftHistory(input: {
     input.emitDraftChange(payload, context)
   }
 
-  function publishDraft(columns: SheetGridColumn[], rows: GridRow[]) {
+  function publishDraft(columns: SheetGridColumn[], rows: GridRow[], styles: SheetStyleRule[]) {
     const context = input.getSheetDraftContext()
-    const payload = buildDraftPayload(columns, rows)
+    const payload = buildDraftPayload(columns, rows, styles)
     input.emitDirtyChange(Boolean(payload), context)
     input.emitDraftChange(payload, context)
   }
 
-  function scheduleDraftChange(columns?: SheetGridColumn[], rows?: GridRow[]) {
+  function scheduleDraftChange(
+    columns?: SheetGridColumn[],
+    rows?: GridRow[],
+    styles?: SheetStyleRule[],
+  ) {
     const context = input.getSheetDraftContext()
     const nextColumns = columns ?? input.readGridColumns()
     const nextRows = rows ?? input.readGridRows()
-    const payload = buildDraftPayload(nextColumns, nextRows)
+    const nextStyles = styles ?? input.readGridStyles()
+    const payload = buildDraftPayload(nextColumns, nextRows, nextStyles)
     input.emitDirtyChange(Boolean(payload), context)
     clearSyncTimer()
     syncTimer.value = window.setTimeout(() => {
@@ -172,25 +199,34 @@ export function useSheetGridDraftHistory(input: {
   function markCommitted(payload: SheetGridUpdateInput) {
     input.inputColumns.value = input.cloneGridColumns(payload.columns)
     input.inputRows.value = input.cloneGridRows(payload.rows)
+    input.inputStyles.value = input.cloneGridStyles(payload.styles)
+    input.runtimeStyles.value = input.cloneGridStyles(payload.styles)
     input.committedGridPayloadHash.value = serializeGridPayload(payload)
     flushDraftChange()
   }
 
-  function applyGridStructureChange(columns: SheetGridColumn[], rows: GridRow[]) {
+  function applyGridStructureChange(
+    columns: SheetGridColumn[],
+    rows: GridRow[],
+    styles: SheetStyleRule[],
+  ) {
     input.preserveCommittedHashOnNextGridReady.value = true
     input.teardownGridRuntime()
     input.inputColumns.value = input.cloneGridColumns(columns)
     input.inputRows.value = input.cloneGridRows(rows)
+    input.inputStyles.value = input.cloneGridStyles(styles)
     input.runtimeColumns.value = input.cloneGridColumns(columns)
     input.runtimeRows.value = input.cloneGridRows(rows)
+    input.runtimeStyles.value = input.cloneGridStyles(styles)
     input.gridRenderVersion.value += 1
-    publishDraft(columns, rows)
+    publishDraft(columns, rows, styles)
   }
 
   function captureGridHistorySnapshot(): GridHistorySnapshot {
     return {
       columns: input.cloneGridColumns(input.readGridColumns()),
       rows: input.cloneGridRows(input.readGridRows()),
+      styles: input.cloneGridStyles(input.readGridStyles()),
     }
   }
 
@@ -206,6 +242,9 @@ export function useSheetGridDraftHistory(input: {
     return {
       columns: input.cloneGridColumns(snapshot.columns as SheetGridColumn[]),
       rows: input.cloneGridRows(snapshot.rows as GridRow[]),
+      styles: input.cloneGridStyles(
+        Array.isArray(snapshot.styles) ? (snapshot.styles as SheetStyleRule[]) : [],
+      ),
     }
   }
 
@@ -282,7 +321,7 @@ export function useSheetGridDraftHistory(input: {
         ].slice(-input.maxHistoryDepth)
       }
 
-      applyGridStructureChange(entry.snapshot.columns, entry.snapshot.rows)
+      applyGridStructureChange(entry.snapshot.columns, entry.snapshot.rows, entry.snapshot.styles)
       return entry.label
     } finally {
       isApplyingGridHistory = false

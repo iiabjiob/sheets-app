@@ -134,5 +134,8 @@ async def update_sheet_grid(
             sheet_id,
             columns=[column.model_dump() for column in payload.columns],
             rows=payload.rows,
+            styles=None
+            if payload.styles is None
+            else [style_rule.model_dump(exclude_none=True) for style_rule in payload.styles],
         )
     )

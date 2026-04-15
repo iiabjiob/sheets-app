@@ -324,6 +324,7 @@ class WorkspaceService:
         *,
         columns: list[dict[str, object]],
         rows: list[dict[str, object]],
+        styles: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         if not columns:
             raise self._validation_error("Sheet must contain at least one column.")
@@ -381,10 +382,12 @@ class WorkspaceService:
 
         sheet = await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=True)
         updated_at = timestamp()
+        previous_styles = deepcopy(sheet.styles_json or [])
         writable_column_keys = [
             str(column["key"]) for column in normalized_columns if not bool(column.get("computed"))
         ]
         normalized_rows = normalize_grid_rows(rows=rows, column_keys=writable_column_keys)
+        normalized_styles = deepcopy(styles) if styles is not None else None
         workbook = await self._touch_sheet_parents(
             session,
             user_id=user_id,
@@ -422,8 +425,11 @@ class WorkspaceService:
             existing_records_by_id=current_records_by_id,
             updated_at=updated_at,
         )
+        styles_changed = normalized_styles is not None and previous_styles != normalized_styles
+        if normalized_styles is not None:
+            sheet.styles_json = normalized_styles
         sheet.updated_at = updated_at
-        if cell_revisions:
+        if cell_revisions or styles_changed:
             self._append_sheet_revision(
                 session,
                 revision_id=revision_id,
@@ -435,10 +441,13 @@ class WorkspaceService:
                 payload={
                     "cellChangeCount": len(cell_revisions),
                     "rowCount": len(normalized_rows),
+                    "styleRuleCount": len(sheet.styles_json or []),
+                    "stylesChanged": styles_changed,
                 },
             )
-            await session.flush()
-            session.add_all(cell_revisions)
+            if cell_revisions:
+                await session.flush()
+                session.add_all(cell_revisions)
         self._append_activity(
             session,
             workspace_id=workspace_id,
@@ -449,6 +458,7 @@ class WorkspaceService:
             payload={
                 "columnCount": len(sheet.columns),
                 "rowCount": len(sheet.records),
+                "styleRuleCount": len(sheet.styles_json or []),
             },
         )
         workbook.updated_at = updated_at

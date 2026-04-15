@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useFloatingTooltip, useTooltipController } from '@affino/tooltip-vue'
 import {
   createDataGridSpreadsheetFormulaReferenceDecorations,
@@ -10,8 +10,10 @@ import {
   defineDataGridComponent,
   defineDataGridFilterCellReader,
   defineDataGridSelectionCellReader,
+  type DataGridAppToolbarModule,
   type DataGridAppClientRowModelOptions,
   type DataGridAppColumnInput,
+  type DataGridCellStyleResolver,
   type DataGridCellMenuColumnOptions,
   type DataGridCellMenuCustomItemContext,
   type DataGridCellMenuProp,
@@ -24,6 +26,7 @@ import {
 import CellHistoryDialog from '@/components/CellHistoryDialog.vue'
 import InlineFormulaPane from '@/components/formulas/InlineFormulaPane.vue'
 import RenameColumnDialog from '@/components/RenameColumnDialog.vue'
+import SheetStyleToolbarModule from '@/components/SheetStyleToolbarModule.vue'
 import {
   type FormulaReferencePointerState,
   type GridFocusRestoreTarget,
@@ -55,11 +58,26 @@ import UiButton from '@/components/ui/UiButton.vue'
 import { workspaceDataGridTheme } from '@/theme/dataGridTheme'
 import type {
   GridColumn as SheetGridColumn,
+  SheetCellStyle,
   GridColumnDataType,
   GridColumnType,
+  SheetHorizontalAlign,
   SheetDetail,
   SheetGridUpdateInput,
+  SheetStyleRule,
+  SheetWrapMode,
 } from '@/types/workspace'
+import {
+  applySheetStylePatchToRules,
+  buildSheetCellStyleCssProperties,
+  buildSheetStyleCellKey,
+  clearSheetStylesInTargets,
+  cloneSheetStyleRules,
+  createSheetStyleCellMap,
+  normalizeSheetStyleRules,
+  rebaseSheetStyleRules,
+  type SheetStyleCellTarget,
+} from '@/utils/sheetStyles'
 import {
   buildSpreadsheetFormulaCellKey,
   buildSpreadsheetFormulaCellResults,
@@ -328,8 +346,10 @@ const emit = defineEmits<{
 
 const inputRows = ref<GridRow[]>([])
 const inputColumns = ref<SheetGridColumn[]>([])
+const inputStyles = ref<SheetStyleRule[]>([])
 const runtimeRows = ref<GridRow[]>([])
 const runtimeColumns = ref<SheetGridColumn[]>([])
+const runtimeStyles = ref<SheetStyleRule[]>([])
 const activeGridState = ref<DataGridUnifiedState<GridRow> | null>(null)
 const dataGridRef = ref<DataGridComponentHandle | null>(null)
 const gridRootRef = ref<HTMLElement | null>(null)
@@ -1047,6 +1067,31 @@ function setInlineFormulaInputRef(element: HTMLTextAreaElement | null) {
   inlineFormulaInputRef.value = element
 }
 
+function resolveTooltipHostElement(
+  target: Element | ComponentPublicInstance | null,
+) {
+  if (target instanceof HTMLElement) {
+    return target
+  }
+
+  const componentElement = target && '$el' in target ? target.$el : null
+  return componentElement instanceof HTMLElement ? componentElement : null
+}
+
+function setFormulaPreviewTooltipElement(
+  element: Element | ComponentPublicInstance | null,
+  _refs?: Record<string, unknown>,
+) {
+  formulaPreviewTooltipRef.value = resolveTooltipHostElement(element)
+}
+
+function setFormulaIndicatorTooltipElement(
+  element: Element | ComponentPublicInstance | null,
+  _refs?: Record<string, unknown>,
+) {
+  formulaIndicatorTooltipRef.value = resolveTooltipHostElement(element)
+}
+
 function resetCellHistoryMenu() {
   // Native package menus manage their own open/close state.
 }
@@ -1420,8 +1465,10 @@ const {
   sheetId: computed(() => props.sheetId),
   inputRows,
   inputColumns,
+  inputStyles,
   runtimeRows,
   runtimeColumns,
+  runtimeStyles,
   committedGridPayloadHash,
   gridRenderVersion,
   preserveCommittedHashOnNextGridReady,
@@ -1436,8 +1483,10 @@ const {
   queueGridFocusRestore: queueGridHistoryFocusRestore,
   readGridRows,
   readGridColumns,
+  readGridStyles,
   cloneGridRows,
   cloneGridColumns,
+  cloneGridStyles,
   normalizeFormulaExpression,
   createClientRowId,
 })
@@ -1543,6 +1592,328 @@ const saveStatusTone = computed(() => {
 
   return props.hasUnsavedChanges ? 'dirty' : 'saved'
 })
+
+const currentGridStyleRows = computed(() =>
+  runtimeRows.value.length ? runtimeRows.value : inputRows.value,
+)
+const currentGridStyleColumns = computed(() =>
+  runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value,
+)
+const currentGridStyleRules = computed(() =>
+  runtimeStyles.value.length ? runtimeStyles.value : inputStyles.value,
+)
+const gridCellStyleMap = computed(() =>
+  createSheetStyleCellMap(
+    currentGridStyleRules.value,
+    currentGridStyleRows.value,
+    currentGridStyleColumns.value,
+  ),
+)
+
+function cloneGridStyles(styles: SheetStyleRule[]) {
+  return cloneSheetStyleRules(styles)
+}
+
+function readGridStyles() {
+  return cloneGridStyles(runtimeStyles.value.length ? runtimeStyles.value : inputStyles.value)
+}
+
+function refreshGridStyleTargets(targets: readonly SheetStyleCellTarget[]) {
+  const api = gridApi.value
+  if (!api?.view?.refreshCellsByRanges || !targets.length) {
+    return
+  }
+
+  const columnKeysByRowId = new Map<string | number, string[]>()
+  for (const target of targets) {
+    const row = currentGridStyleRows.value[target.rowIndex]
+    const column = currentGridStyleColumns.value[target.columnIndex]
+    if (!row || !column) {
+      continue
+    }
+
+    const rowId = String(row.id ?? '')
+    if (!rowId) {
+      continue
+    }
+
+    const existingColumnKeys = columnKeysByRowId.get(rowId) ?? []
+    if (!existingColumnKeys.includes(column.key)) {
+      existingColumnKeys.push(column.key)
+    }
+    columnKeysByRowId.set(rowId, existingColumnKeys)
+  }
+
+  const ranges = [...columnKeysByRowId.entries()].map(([rowKey, columnKeys]) => ({
+    rowKey,
+    columnKeys,
+  }))
+  if (!ranges.length) {
+    return
+  }
+
+  api.view.refreshCellsByRanges(ranges, {
+    immediate: true,
+    reason: 'sheet-style-update',
+  })
+}
+
+function normalizeColorPickerValue(value: unknown) {
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  const normalized = value.trim()
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalized) ? normalized : ''
+}
+
+function addSelectedStyleTargets(
+  nextTargets: SheetStyleCellTarget[],
+  seenTargets: Set<string>,
+  startRow: number,
+  endRow: number,
+  startColumn: number,
+  endColumn: number,
+) {
+  const rowCount = currentGridStyleRows.value.length
+  const columnCount = currentGridStyleColumns.value.length
+  if (!rowCount || !columnCount) {
+    return
+  }
+
+  const normalizedStartRow = Math.max(0, Math.min(startRow, endRow))
+  const normalizedEndRow = Math.min(rowCount - 1, Math.max(startRow, endRow))
+  const normalizedStartColumn = Math.max(0, Math.min(startColumn, endColumn))
+  const normalizedEndColumn = Math.min(columnCount - 1, Math.max(startColumn, endColumn))
+
+  for (let rowIndex = normalizedStartRow; rowIndex <= normalizedEndRow; rowIndex += 1) {
+    for (let columnIndex = normalizedStartColumn; columnIndex <= normalizedEndColumn; columnIndex += 1) {
+      const cellKey = buildSheetStyleCellKey(rowIndex, columnIndex)
+      if (seenTargets.has(cellKey)) {
+        continue
+      }
+
+      seenTargets.add(cellKey)
+      nextTargets.push({ rowIndex, columnIndex })
+    }
+  }
+}
+
+function resolveSelectedStyleTargets() {
+  const snapshot = gridSelectionSnapshot.value
+  const nextTargets: SheetStyleCellTarget[] = []
+  const seenTargets = new Set<string>()
+
+  if (!snapshot) {
+    return nextTargets
+  }
+
+  const ranges = snapshot.ranges ?? []
+  if (ranges.length) {
+    for (const range of ranges) {
+      addSelectedStyleTargets(
+        nextTargets,
+        seenTargets,
+        range.startRow,
+        range.endRow,
+        range.startCol,
+        range.endCol,
+      )
+    }
+
+    return nextTargets
+  }
+
+  if (snapshot.selectionRange) {
+    addSelectedStyleTargets(
+      nextTargets,
+      seenTargets,
+      snapshot.selectionRange.startRow,
+      snapshot.selectionRange.endRow,
+      snapshot.selectionRange.startColumn,
+      snapshot.selectionRange.endColumn,
+    )
+    return nextTargets
+  }
+
+  if (snapshot.activeCell) {
+    addSelectedStyleTargets(
+      nextTargets,
+      seenTargets,
+      snapshot.activeCell.rowIndex,
+      snapshot.activeCell.rowIndex,
+      snapshot.activeCell.colIndex,
+      snapshot.activeCell.colIndex,
+    )
+  }
+
+  return nextTargets
+}
+
+const selectedStyleTargets = computed(() => resolveSelectedStyleTargets())
+const selectedStyleCells = computed(() =>
+  selectedStyleTargets.value.map(
+    (target) => gridCellStyleMap.value.get(buildSheetStyleCellKey(target.rowIndex, target.columnIndex)) ?? null,
+  ),
+)
+const selectedStyleLabel = computed(() => {
+  const count = selectedStyleTargets.value.length
+  if (!count) {
+    return 'Select cells to format'
+  }
+
+  return `${count} ${count === 1 ? 'cell' : 'cells'} selected`
+})
+const hasStyledSelection = computed(() => selectedStyleCells.value.some((style) => Boolean(style)))
+
+function resolveUniformSelectionStyleValue<TKey extends keyof SheetCellStyle>(key: TKey) {
+  const styles = selectedStyleCells.value
+  if (!styles.length) {
+    return null
+  }
+
+  const firstValue = styles[0]?.[key] ?? null
+  return styles.every((style) => (style?.[key] ?? null) === firstValue) ? firstValue : null
+}
+
+const selectionBoldActive = computed(
+  () => selectedStyleCells.value.length > 0 && selectedStyleCells.value.every((style) => style?.bold === true),
+)
+const selectionItalicActive = computed(
+  () => selectedStyleCells.value.length > 0 && selectedStyleCells.value.every((style) => style?.italic === true),
+)
+const selectionUnderlineActive = computed(
+  () => selectedStyleCells.value.length > 0 && selectedStyleCells.value.every((style) => style?.underline === true),
+)
+const selectionHorizontalAlign = computed<SheetHorizontalAlign | ''>(() => {
+  const value = resolveUniformSelectionStyleValue('horizontal_align')
+  return typeof value === 'string' ? (value as SheetHorizontalAlign) : ''
+})
+const selectionWrapMode = computed<SheetWrapMode | ''>(() => {
+  const value = resolveUniformSelectionStyleValue('wrap_mode')
+  return typeof value === 'string' ? (value as SheetWrapMode) : ''
+})
+const selectionTextColor = computed(() =>
+  normalizeColorPickerValue(resolveUniformSelectionStyleValue('text_color')),
+)
+const selectionBackgroundColor = computed(() =>
+  normalizeColorPickerValue(resolveUniformSelectionStyleValue('background_color')),
+)
+
+function applyNextGridStyles(nextStyles: SheetStyleRule[], historyLabel: string) {
+  const normalizedStyles = normalizeSheetStyleRules(
+    nextStyles,
+    currentGridStyleRows.value,
+    currentGridStyleColumns.value,
+  )
+  if (JSON.stringify(readGridStyles()) === JSON.stringify(normalizedStyles)) {
+    return
+  }
+
+  const beforeSnapshot = captureGridHistorySnapshot()
+  inputStyles.value = cloneGridStyles(normalizedStyles)
+  runtimeStyles.value = cloneGridStyles(normalizedStyles)
+  scheduleDraftChange(undefined, undefined, normalizedStyles)
+  refreshGridStyleTargets(selectedStyleTargets.value)
+  recordGridHistoryTransaction(historyLabel, beforeSnapshot)
+}
+
+function applySelectionStylePatch(patch: Partial<SheetCellStyle>, historyLabel: string) {
+  if (!selectedStyleTargets.value.length) {
+    return
+  }
+
+  const nextStyles = applySheetStylePatchToRules(
+    readGridStyles(),
+    currentGridStyleRows.value,
+    currentGridStyleColumns.value,
+    selectedStyleTargets.value,
+    patch,
+  )
+  applyNextGridStyles(nextStyles, historyLabel)
+}
+
+function clearSelectionStyles() {
+  if (!selectedStyleTargets.value.length) {
+    return
+  }
+
+  const nextStyles = clearSheetStylesInTargets(
+    readGridStyles(),
+    currentGridStyleRows.value,
+    currentGridStyleColumns.value,
+    selectedStyleTargets.value,
+  )
+  applyNextGridStyles(nextStyles, 'Clear cell styles')
+}
+
+function toggleSelectionBold() {
+  applySelectionStylePatch({ bold: !selectionBoldActive.value }, 'Toggle bold')
+}
+
+function toggleSelectionItalic() {
+  applySelectionStylePatch({ italic: !selectionItalicActive.value }, 'Toggle italic')
+}
+
+function toggleSelectionUnderline() {
+  applySelectionStylePatch({ underline: !selectionUnderlineActive.value }, 'Toggle underline')
+}
+
+function setSelectionHorizontalAlign(value: SheetHorizontalAlign) {
+  applySelectionStylePatch({ horizontal_align: value }, 'Change horizontal alignment')
+}
+
+function setSelectionWrapMode(value: SheetWrapMode) {
+  applySelectionStylePatch({ wrap_mode: value }, 'Change wrap mode')
+}
+
+function setSelectionTextColor(value: string | null) {
+  applySelectionStylePatch({ text_color: value }, value ? 'Change text color' : 'Clear text color')
+}
+
+function setSelectionBackgroundColor(value: string | null) {
+  applySelectionStylePatch(
+    { background_color: value },
+    value ? 'Change fill color' : 'Clear fill color',
+  )
+}
+
+const gridToolbarModules = computed<readonly DataGridAppToolbarModule[]>(() => [
+  {
+    key: 'sheet-style-panel',
+    component: SheetStyleToolbarModule,
+    props: {
+      hasSelection: selectedStyleTargets.value.length > 0,
+      selectionLabel: selectedStyleLabel.value,
+      hasStyledSelection: hasStyledSelection.value,
+      boldActive: selectionBoldActive.value,
+      italicActive: selectionItalicActive.value,
+      underlineActive: selectionUnderlineActive.value,
+      horizontalAlign: selectionHorizontalAlign.value,
+      wrapMode: selectionWrapMode.value,
+      textColor: selectionTextColor.value,
+      backgroundColor: selectionBackgroundColor.value,
+      onToggleBold: toggleSelectionBold,
+      onToggleItalic: toggleSelectionItalic,
+      onToggleUnderline: toggleSelectionUnderline,
+      onSetHorizontalAlign: setSelectionHorizontalAlign,
+      onSetWrapMode: setSelectionWrapMode,
+      onSetTextColor: setSelectionTextColor,
+      onSetBackgroundColor: setSelectionBackgroundColor,
+      onClearStyles: clearSelectionStyles,
+    },
+  },
+])
+
+const resolveGridCellStyle: DataGridCellStyleResolver<GridRow> = (
+  _rowNode,
+  rowIndex,
+  _column,
+  columnIndex,
+) => {
+  const style = gridCellStyleMap.value.get(buildSheetStyleCellKey(rowIndex, columnIndex)) ?? null
+  return style ? buildSheetCellStyleCssProperties(style) : null
+}
 
 const gridColumns = computed<DataGridAppColumnInput<GridRow>[]>(() =>
   inputColumns.value.map((column) => toDataGridColumn(column)),
@@ -1782,8 +2153,10 @@ const {
   gridRowModel,
   runtimeRows,
   runtimeColumns,
+  runtimeStyles,
   inputRows,
   inputColumns,
+  inputStyles,
   gridSelectionSnapshot,
   gridSelectionAggregatesLabel,
   committedGridPayloadHash,
@@ -1810,11 +2183,30 @@ const {
   getGridRuntime,
   readGridColumns,
   readGridRows,
+  readGridStyles,
+  cloneGridColumns,
   cloneGridRows,
+  cloneGridStyles,
   serializeGridPayload,
   scheduleDraftChange,
   scheduleFormulaCellRefresh,
   rebaseRowsAfterReorder: rebaseFormulaRowsAfterReorder,
+  rebaseGridStylesAfterRowChange: (previousRows, nextRows) =>
+    rebaseSheetStyleRules(
+      readGridStyles(),
+      previousRows,
+      readGridColumns(),
+      nextRows,
+      readGridColumns(),
+    ),
+  rebaseGridStylesAfterColumnChange: (previousColumns, nextColumns) =>
+    rebaseSheetStyleRules(
+      readGridStyles(),
+      readGridRows(),
+      previousColumns,
+      readGridRows(),
+      nextColumns,
+    ),
   isEditableRowModel,
   gridRootRef,
 })
@@ -1831,11 +2223,18 @@ watch(
     clearGridHistory()
     inputColumns.value = cloneGridColumns(props.sheet?.columns ?? [])
     inputRows.value = cloneGridRows(props.sheet?.rows ?? [])
+    inputStyles.value = normalizeSheetStyleRules(
+      props.sheet?.styles ?? [],
+      props.sheet?.rows ?? [],
+      props.sheet?.columns ?? [],
+    )
     runtimeColumns.value = cloneGridColumns(props.sheet?.columns ?? [])
     runtimeRows.value = cloneGridRows(props.sheet?.rows ?? [])
+    runtimeStyles.value = cloneGridStyles(inputStyles.value)
     committedGridPayloadHash.value = serializeGridPayload({
       columns: inputColumns.value,
       rows: inputRows.value,
+      styles: inputStyles.value,
     })
     lastStableFormulaCellResults.value = new Map()
     isGridCellEditorActive.value = false
@@ -2487,7 +2886,14 @@ function handleGridStructuralRowAction(context: GridStructuralRowActionContextLi
     const beforeSnapshot = captureGridHistorySnapshot()
     const selectedRowIndexSet = new Set(selectedRowIndices)
     const nextRows = currentRows.filter((_, rowIndex) => !selectedRowIndexSet.has(rowIndex))
-    applyGridStructureChange(currentColumns, nextRows)
+    const nextStyles = rebaseSheetStyleRules(
+      readGridStyles(),
+      currentRows,
+      currentColumns,
+      nextRows,
+      currentColumns,
+    )
+    applyGridStructureChange(currentColumns, nextRows, nextStyles)
     recordGridHistoryTransaction(
       `Delete ${selectedRowIndices.length} ${selectedRowIndices.length === 1 ? 'row' : 'rows'}`,
       beforeSnapshot,
@@ -2542,7 +2948,14 @@ function handleGridStructuralRowAction(context: GridStructuralRowActionContextLi
     insertAtRowIndex,
     rowCount,
   )
-  applyGridStructureChange(rewrittenStructure.columns, rewrittenStructure.rows)
+  const nextStyles = rebaseSheetStyleRules(
+    readGridStyles(),
+    currentRows,
+    currentColumns,
+    rewrittenStructure.rows,
+    rewrittenStructure.columns,
+  )
+  applyGridStructureChange(rewrittenStructure.columns, rewrittenStructure.rows, nextStyles)
   recordGridHistoryTransaction(
     `Insert ${rowCount} ${rowCount === 1 ? 'row' : 'rows'} ${context.action === 'insert-row-above' ? 'above' : 'below'}`,
     beforeSnapshot,
@@ -3345,6 +3758,7 @@ function readFormulaCellRefreshRanges() {
 
 function insertColumn(anchorKey: string, position: 'before' | 'after') {
   const currentColumns = readGridColumns()
+  const currentRows = readGridRows()
   const anchorIndex = currentColumns.findIndex((column) => column.key === anchorKey)
   if (anchorIndex < 0) {
     return
@@ -3354,7 +3768,14 @@ function insertColumn(anchorKey: string, position: 'before' | 'after') {
   const nextColumn = createInsertedColumn(currentColumns)
   const nextColumns = [...currentColumns]
   nextColumns.splice(anchorIndex + (position === 'after' ? 1 : 0), 0, nextColumn)
-  applyGridStructureChange(nextColumns, readGridRows())
+  const nextStyles = rebaseSheetStyleRules(
+    readGridStyles(),
+    currentRows,
+    currentColumns,
+    currentRows,
+    nextColumns,
+  )
+  applyGridStructureChange(nextColumns, currentRows, nextStyles)
   recordGridHistoryTransaction(
     position === 'before' ? 'Insert column left' : 'Insert column right',
     beforeSnapshot,
@@ -3504,7 +3925,7 @@ function handleColumnNameRename(
         : metadataColumns[index]?.data_type ?? column.data_type,
   }))
 
-  applyGridStructureChange(nextColumns, rewrittenStructure.rows)
+  applyGridStructureChange(nextColumns, rewrittenStructure.rows, readGridStyles())
   recordGridHistoryTransaction('Rename column', beforeSnapshot)
 }
 
@@ -3552,25 +3973,33 @@ function handleColumnReferenceKeyRename(columnKey: string, nextReferenceKey: str
     return nextRow
   })
 
-  applyGridStructureChange(nextColumns, nextRows)
+  applyGridStructureChange(nextColumns, nextRows, readGridStyles())
   recordGridHistoryTransaction('Rename column reference key', beforeSnapshot)
 }
 
 function deleteColumn(columnKey: string) {
   const currentColumns = readGridColumns()
+  const currentRows = readGridRows()
   if (currentColumns.length <= 1) {
     return
   }
 
   const beforeSnapshot = captureGridHistorySnapshot()
   const nextColumns = currentColumns.filter((column) => column.key !== columnKey)
-  const nextRows = readGridRows().map((row) => {
+  const nextRows = currentRows.map((row) => {
     const nextRow: GridRow = { ...row }
     delete nextRow[columnKey]
     return nextRow
   })
 
-  applyGridStructureChange(nextColumns, nextRows)
+  const nextStyles = rebaseSheetStyleRules(
+    readGridStyles(),
+    currentRows,
+    currentColumns,
+    nextRows,
+    nextColumns,
+  )
+  applyGridStructureChange(nextColumns, nextRows, nextStyles)
   recordGridHistoryTransaction('Delete column', beforeSnapshot)
 }
 
@@ -4421,8 +4850,10 @@ defineExpose<SheetStageHandle>({
             :client-row-model-options="CLIENT_ROW_MODEL_OPTIONS"
             :read-selection-cell="readGridSelectionCell"
             :read-filter-cell="readGridFilterCell"
+            :cell-style="resolveGridCellStyle"
             :virtualization="GRID_VIRTUALIZATION"
             :grid-lines="GRID_LINES"
+            :toolbar-modules="gridToolbarModules"
             render-mode="virtualization"
             layout-mode="fill"
             :base-row-height="26"
@@ -4456,7 +4887,7 @@ defineExpose<SheetStageHandle>({
           >
             <div
               v-if="isFormulaPreviewTooltipOpen && formulaPreviewTooltipState"
-              ref="formulaPreviewTooltipRef"
+              :ref="setFormulaPreviewTooltipElement"
               class="sheet-stage__formula-preview-tooltip"
               v-bind="formulaPreviewTooltipProps"
               :style="formulaPreviewTooltipStyle"
@@ -4476,7 +4907,7 @@ defineExpose<SheetStageHandle>({
           >
             <div
               v-if="isFormulaIndicatorTooltipOpen && formulaIndicatorTooltipState"
-              ref="formulaIndicatorTooltipRef"
+              :ref="setFormulaIndicatorTooltipElement"
               class="sheet-stage__formula-indicator-tooltip"
               v-bind="formulaIndicatorTooltipProps"
               :style="formulaIndicatorTooltipStyle"
