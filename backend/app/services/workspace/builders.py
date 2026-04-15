@@ -230,8 +230,10 @@ def normalize_grid_rows(
     *,
     rows: list[dict[str, object]],
     column_keys: list[str],
+    system_column_keys: list[str] | None = None,
 ) -> list[dict[str, object]]:
     normalized_rows: list[dict[str, object]] = []
+    normalized_system_column_keys = [key for key in (system_column_keys or []) if key]
 
     for row in rows:
         raw_row_id = str(row.get("id") or "").strip()
@@ -247,7 +249,11 @@ def normalize_grid_rows(
             if column_key in row:
                 row_payload[column_key] = deepcopy(row[column_key])
 
-        if not row_has_meaningful_values(row_payload, column_keys):
+        has_system_values = any(
+            _has_meaningful_row_value(row.get(column_key))
+            for column_key in normalized_system_column_keys
+        )
+        if not row_has_meaningful_values(row_payload, column_keys) and not has_system_values:
             continue
 
         normalized_rows.append(row_payload)
@@ -257,20 +263,23 @@ def normalize_grid_rows(
 
 def row_has_meaningful_values(row: dict[str, object], column_keys: list[str]) -> bool:
     for column_key in column_keys:
-        value = row.get(column_key)
-
-        if value is None:
-            continue
-
-        if isinstance(value, str) and not value.strip():
-            continue
-
-        if isinstance(value, (list, dict)) and not value:
-            continue
-
-        return True
+        if _has_meaningful_row_value(row.get(column_key)):
+            return True
 
     return False
+
+
+def _has_meaningful_row_value(value: object) -> bool:
+    if value is None:
+        return False
+
+    if isinstance(value, str) and not value.strip():
+        return False
+
+    if isinstance(value, (list, dict)) and not value:
+        return False
+
+    return True
 
 
 def build_default_view(sheet_id: str, user_id: str) -> SheetViewModel:

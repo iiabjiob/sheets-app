@@ -12,10 +12,13 @@ export const GRID_COLUMN_TYPE_OPTIONS: readonly GridColumnTypeOption[] = [
   { value: 'currency', label: 'Currency', dataType: 'currency' },
   { value: 'percent', label: 'Percent', dataType: 'number' },
   { value: 'checkbox', label: 'Checkbox', dataType: 'text' },
+  { value: 'created_by', label: 'Created by', dataType: 'text' },
+  { value: 'created_at', label: 'Created at', dataType: 'date' },
+  { value: 'updated_by', label: 'Updated by', dataType: 'text' },
+  { value: 'updated_at', label: 'Updated at', dataType: 'date' },
   { value: 'date', label: 'Date picker', dataType: 'date' },
   { value: 'datetime', label: 'Date & time', dataType: 'date' },
-  { value: 'select', label: 'Combobox', dataType: 'text' },
-  { value: 'status', label: 'Status', dataType: 'status' },
+  { value: 'select', label: 'Dropdown list', dataType: 'text' },
   { value: 'user', label: 'User', dataType: 'text' },
   { value: 'duration', label: 'Duration', dataType: 'text' },
 ] as const
@@ -34,6 +37,10 @@ export function normalizeGridColumnTypeValue(value: unknown): GridColumnType | n
     case 'number':
     case 'currency':
     case 'checkbox':
+    case 'created_at':
+    case 'created_by':
+    case 'updated_at':
+    case 'updated_by':
     case 'date':
     case 'datetime':
     case 'duration':

@@ -37,6 +37,7 @@ from app.services.workspace.ordering import (
     sort_workbooks,
 )
 from app.services.workspace.serialization import (
+    resolve_system_grid_column_kind,
     serialize_sheet,
     serialize_sheet_workbook_context,
     serialize_workspace,
@@ -373,23 +374,35 @@ class WorkspaceService:
                     "data_type": str(column.get("data_type") or "text"),
                     "column_type": str(column.get("column_type") or ("formula" if computed else "")),
                     "width": column.get("width"),
-                    "editable": False if computed else bool(column.get("editable", True)),
+                    "editable": False
+                    if computed or str(column.get("column_type") or "").strip() in {"created_by", "created_at"}
+                    else bool(column.get("editable", True)),
                     "computed": computed,
                     "expression": expression or None,
                     "options": column.get("options") if isinstance(column.get("options"), list) else [],
                     "settings": settings,
                 }
             )
-
         sheet = await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=True)
         updated_at = timestamp()
         previous_columns = self._build_activity_columns_snapshot(sheet.columns)
         previous_row_ids = [record.id for record in sorted(sheet.records, key=lambda record: record.position) if not record.archived]
         previous_styles = deepcopy(sheet.styles_json or [])
         writable_column_keys = [
-            str(column["key"]) for column in normalized_columns if not bool(column.get("computed"))
+            str(column["key"])
+            for column in normalized_columns
+            if not bool(column.get("computed")) and resolve_system_grid_column_kind(column) is None
         ]
-        normalized_rows = normalize_grid_rows(rows=rows, column_keys=writable_column_keys)
+        system_column_keys = [
+            str(column["key"])
+            for column in normalized_columns
+            if resolve_system_grid_column_kind(column) is not None
+        ]
+        normalized_rows = normalize_grid_rows(
+            rows=rows,
+            column_keys=writable_column_keys,
+            system_column_keys=system_column_keys,
+        )
         normalized_styles = deepcopy(styles) if styles is not None else None
         workbook = await self._touch_sheet_parents(
             session,

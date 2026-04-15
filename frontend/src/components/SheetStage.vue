@@ -3,6 +3,9 @@ import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch, type Com
 import { useFloatingTooltip, useTooltipController } from '@affino/tooltip-vue'
 import {
   createDataGridSpreadsheetFormulaReferenceDecorations,
+  serializeColumnValueToToken,
+  type DataGridColumnHistogramEntry,
+  type DataGridFilterCellStyleReader,
   type DataGridFilterSnapshot,
   type DataGridUnifiedState,
 } from '@affino/datagrid-core'
@@ -24,6 +27,7 @@ import {
 } from '@affino/datagrid-vue-app'
 
 import CellHistoryDialog from '@/components/CellHistoryDialog.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import SheetActivityPanel from '@/components/SheetActivityPanel.vue'
 import InlineFormulaPane from '@/components/formulas/InlineFormulaPane.vue'
 import RenameColumnDialog from '@/components/RenameColumnDialog.vue'
@@ -57,6 +61,7 @@ import {
   type FormulaCaretSelection,
 } from '@/formulas/formulaAutocomplete'
 import UiButton from '@/components/ui/UiButton.vue'
+import { useAuthStore } from '@/stores/auth'
 import {
   readSheetColumnWidthPreferences,
   writeSheetColumnWidthPreferences,
@@ -119,6 +124,20 @@ type GridPasteOptions = {
   mode?: 'default' | 'values'
 }
 
+type GridStyleFilterKey = 'backgroundColor' | 'color'
+
+const GRID_STYLE_FILTER_KEY_PREFIX = '__sheet_style_filter__:'
+
+type GridColumnStyleFilterEntry = {
+  kind: 'styleValueSet'
+  styleKey: GridStyleFilterKey | string
+  tokens: string[]
+}
+
+type GridFilterSnapshotWithStyleFilters = DataGridFilterSnapshot & {
+  columnStyleFilters?: Record<string, GridColumnStyleFilterEntry | null | undefined>
+}
+
 interface GridSourceRowNode {
   rowId: string | number
   data: GridRow
@@ -158,8 +177,33 @@ interface GridApiLike<TRow> {
   }
   columns: {
     getSnapshot(): unknown
+    getHistogram?(
+      columnId: string,
+      options?: {
+        scope?: 'filtered' | 'sourceAll'
+        ignoreSelfFilter?: boolean
+        styleKey?: string
+        limit?: number
+        orderBy?: 'countDesc' | 'valueAsc'
+      },
+    ): readonly DataGridColumnHistogramEntry[]
     insertBefore(anchorKey: string, columns: DataGridAppColumnInput<TRow>[]): boolean
     insertAfter(anchorKey: string, columns: DataGridAppColumnInput<TRow>[]): boolean
+  }
+  rows?: {
+    setFilterModel(filterModel: DataGridFilterSnapshot | null): void
+  }
+  state?: {
+    get(): DataGridUnifiedState<TRow>
+    set(
+      state: DataGridUnifiedState<TRow>,
+      options?: {
+        applyColumns?: boolean
+        applySelection?: boolean
+        applyViewport?: boolean
+        strict?: boolean
+      },
+    ): void
   }
   selection?: {
     getSnapshot(): unknown
@@ -328,10 +372,24 @@ const GRID_VIRTUALIZATION = {
 
 const TypedDataGrid = defineDataGridComponent<GridRow>()
 
-const CLIENT_ROW_MODEL_OPTIONS: DataGridAppClientRowModelOptions<GridRow> = {
+const BASE_CLIENT_ROW_MODEL_OPTIONS: DataGridAppClientRowModelOptions<GridRow> = {
   resolveRowId: (row: Record<string, unknown>) => String(row.id ?? ''),
 }
 const MAX_GRID_HISTORY_DEPTH = 100
+const GRID_SYSTEM_COLUMN_TYPES = new Set<GridColumnType>([
+  'created_by',
+  'created_at',
+  'updated_by',
+  'updated_at',
+])
+const GRID_ROW_CREATED_BY_META_KEY = '__record_created_by'
+const GRID_ROW_CREATED_AT_META_KEY = '__record_created_at'
+const GRID_ROW_UPDATED_BY_META_KEY = '__record_updated_by'
+const GRID_ROW_UPDATED_AT_META_KEY = '__record_updated_at'
+const GRID_DATETIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+})
 
 const props = defineProps<{
   workspaceId: string | null
@@ -353,6 +411,8 @@ const emit = defineEmits<{
   dirtyChange: [value: boolean, context: SheetDraftContext]
   save: []
 }>()
+
+const authStore = useAuthStore()
 
 const inputRows = ref<GridRow[]>([])
 const inputColumns = ref<SheetGridColumn[]>([])
@@ -376,6 +436,14 @@ const renameColumnDialogOpen = ref(false)
 const renameColumnTargetKey = ref<string | null>(null)
 const renameColumnInitialValue = ref('')
 const renameColumnInitialType = ref<GridColumnType>('text')
+const renameColumnInitialOptions = ref<string[]>([])
+const systemColumnReplacementDialogOpen = ref(false)
+const pendingSystemColumnReplacement = ref<{
+  columnKey: string
+  name: string
+  columnType: GridColumnType
+  options: string[]
+} | null>(null)
 const gridSelectionSnapshot = ref<GridSelectionSnapshotLike | null>(null)
 const gridSelectionAggregatesLabel = ref('')
 const gridSelectionInteractionSource = ref<GridSelectionInteractionSource>('programmatic')
@@ -1187,7 +1255,7 @@ function buildPlaceholderRowsConfig(
 
   return {
     count: normalizedCount,
-    createRowAt: () => createEmptyRow(),
+    createRowAt: () => createEmptyRow({ includeSystemValues: true }),
   }
 }
 
@@ -1210,11 +1278,35 @@ function hasActiveAdvancedFilter(filterModel: DataGridFilterSnapshot | null | un
     return false
   }
 
-  if (filterModel.advancedExpression) {
+  const normalizedFilterModel = filterModel as GridFilterSnapshotWithStyleFilters
+
+  const columnFilters = Object.values(normalizedFilterModel.columnFilters ?? {})
+  if (
+    columnFilters.some((entry) => {
+      if (Array.isArray(entry)) {
+        return entry.length > 0
+      }
+
+      if (entry?.kind === 'valueSet') {
+        return entry.tokens.length > 0
+      }
+
+      return Boolean(entry)
+    })
+  ) {
     return true
   }
 
-  return Object.keys(filterModel.advancedFilters ?? {}).length > 0
+  const columnStyleFilters = Object.values(normalizedFilterModel.columnStyleFilters ?? {})
+  if (columnStyleFilters.some((entry) => (entry?.tokens.length ?? 0) > 0)) {
+    return true
+  }
+
+  if (normalizedFilterModel.advancedExpression) {
+    return true
+  }
+
+  return Object.keys(normalizedFilterModel.advancedFilters ?? {}).length > 0
 }
 
 const shouldDelayPlaceholderRowsRestore = ref(false)
@@ -1714,6 +1806,16 @@ const currentGridStyleColumns = computed(() =>
 const currentGridStyleRules = computed(() =>
   runtimeStyles.value.length ? runtimeStyles.value : inputStyles.value,
 )
+const currentGridStyleRowIndexById = computed(() =>
+  new Map(
+    currentGridStyleRows.value.map((row, rowIndex) => [String(row.id ?? ''), rowIndex]),
+  ),
+)
+const currentGridStyleColumnIndexByKey = computed(() =>
+  new Map(
+    currentGridStyleColumns.value.map((column, columnIndex) => [column.key, columnIndex]),
+  ),
+)
 const gridCellStyleMap = computed(() =>
   createSheetStyleCellMap(
     currentGridStyleRules.value,
@@ -1835,6 +1937,345 @@ function normalizeColorPickerValue(value: unknown) {
 
   const normalized = value.trim()
   return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalized) ? normalized : ''
+}
+
+function normalizeGridFilterModel(filterModel: DataGridFilterSnapshot | null | undefined) {
+  const normalizedFilterModel = filterModel as GridFilterSnapshotWithStyleFilters | null | undefined
+
+  return {
+    columnFilters: { ...(normalizedFilterModel?.columnFilters ?? {}) },
+    columnStyleFilters: Object.fromEntries(
+      Object.entries(normalizedFilterModel?.columnStyleFilters ?? {}).map(([columnKey, entry]) => [
+        columnKey,
+        entry
+          ? {
+              ...entry,
+              tokens: [...entry.tokens],
+            }
+          : entry,
+      ]),
+    ) as GridFilterSnapshotWithStyleFilters['columnStyleFilters'],
+    advancedFilters: { ...(normalizedFilterModel?.advancedFilters ?? {}) },
+    advancedExpression: normalizedFilterModel?.advancedExpression ?? null,
+  } satisfies GridFilterSnapshotWithStyleFilters
+}
+
+function buildSyntheticColumnStyleFilterKey(
+  columnKey: string,
+  styleKey: GridStyleFilterKey,
+) {
+  return `${GRID_STYLE_FILTER_KEY_PREFIX}${columnKey}:${styleKey}`
+}
+
+function parseSyntheticColumnStyleFilterKey(columnKey: string) {
+  if (!columnKey.startsWith(GRID_STYLE_FILTER_KEY_PREFIX)) {
+    return null
+  }
+
+  const rawValue = columnKey.slice(GRID_STYLE_FILTER_KEY_PREFIX.length)
+  const separatorIndex = rawValue.lastIndexOf(':')
+  if (separatorIndex <= 0) {
+    return null
+  }
+
+  const resolvedColumnKey = rawValue.slice(0, separatorIndex).trim()
+  const resolvedStyleKey = rawValue.slice(separatorIndex + 1).trim()
+  if (!resolvedColumnKey || (resolvedStyleKey !== 'backgroundColor' && resolvedStyleKey !== 'color')) {
+    return null
+  }
+
+  return {
+    columnKey: resolvedColumnKey,
+    styleKey: resolvedStyleKey as GridStyleFilterKey,
+  }
+}
+
+function resolveActiveGridFilterModel() {
+  return normalizeGridFilterModel(
+    gridApi.value?.state?.get().rows.snapshot.filterModel ??
+      activeGridState.value?.rows.snapshot.filterModel ??
+      null,
+  )
+}
+
+function resolveColumnStyleFilterEntry(columnKey: string) {
+  const filterEntry = resolveActiveGridFilterModel().columnFilters?.[
+    buildSyntheticColumnStyleFilterKey(columnKey, 'backgroundColor')
+  ]
+  if (filterEntry?.kind === 'valueSet') {
+    return {
+      kind: 'styleValueSet',
+      styleKey: 'backgroundColor',
+      tokens: [...filterEntry.tokens],
+    } satisfies GridColumnStyleFilterEntry
+  }
+
+  const textFilterEntry = resolveActiveGridFilterModel().columnFilters?.[
+    buildSyntheticColumnStyleFilterKey(columnKey, 'color')
+  ]
+  if (textFilterEntry?.kind === 'valueSet') {
+    return {
+      kind: 'styleValueSet',
+      styleKey: 'color',
+      tokens: [...textFilterEntry.tokens],
+    } satisfies GridColumnStyleFilterEntry
+  }
+
+  return null
+}
+
+function resolveColumnStyleFilterTokens(columnKey: string, styleKey: GridStyleFilterKey) {
+  const entry = resolveActiveGridFilterModel().columnFilters?.[
+    buildSyntheticColumnStyleFilterKey(columnKey, styleKey)
+  ]
+  if (entry?.kind !== 'valueSet') {
+    return []
+  }
+
+  return [...entry.tokens]
+}
+
+function buildColumnStyleFilterItemKey(
+  columnKey: string,
+  styleKey: GridStyleFilterKey,
+  token: string,
+) {
+  return `column-style-filter:${columnKey}:${styleKey}:${token}`
+}
+
+function resolveGridCellStyleFilterValue(
+  rowIndex: number,
+  columnKey: string,
+  styleKey: GridStyleFilterKey,
+) {
+  const columnIndex = currentGridStyleColumnIndexByKey.value.get(columnKey)
+  if (columnIndex === undefined) {
+    return null
+  }
+
+  const style = gridCellStyleMap.value.get(buildSheetStyleCellKey(rowIndex, columnIndex))
+  if (!style) {
+    return null
+  }
+
+  if (styleKey === 'backgroundColor') {
+    return normalizeColorPickerValue(style.background_color)
+      ? style.background_color?.trim() ?? null
+      : null
+  }
+
+  return normalizeColorPickerValue(style.text_color)
+    ? style.text_color?.trim() ?? null
+    : null
+}
+
+function resolveGridCellStyleFilterValueByRowId(
+  rowId: string,
+  columnKey: string,
+  styleKey: GridStyleFilterKey,
+) {
+  const rowIndex = currentGridStyleRowIndexById.value.get(rowId)
+  if (rowIndex === undefined) {
+    return null
+  }
+
+  return resolveGridCellStyleFilterValue(rowIndex, columnKey, styleKey)
+}
+
+function resolveColumnStyleHistogramEntries(columnKey: string, styleKey: GridStyleFilterKey) {
+  const entriesByToken = new Map<string, DataGridColumnHistogramEntry>()
+
+  for (let rowIndex = 0; rowIndex < currentGridStyleRows.value.length; rowIndex += 1) {
+    const value = resolveGridCellStyleFilterValue(rowIndex, columnKey, styleKey)
+    const token = serializeColumnValueToToken(value)
+    const existingEntry = entriesByToken.get(token)
+    if (existingEntry) {
+      existingEntry.count += 1
+      continue
+    }
+
+    entriesByToken.set(token, {
+      token,
+      value,
+      count: 1,
+      text: typeof value === 'string' ? value : undefined,
+    })
+  }
+
+  return [...entriesByToken.values()].sort((left, right) => {
+    if (right.count !== left.count) {
+      return right.count - left.count
+    }
+
+    const leftLabel = resolveColumnStyleFilterValueLabel(left.value, '')
+    const rightLabel = resolveColumnStyleFilterValueLabel(right.value, '')
+    return leftLabel.localeCompare(rightLabel, undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    })
+  })
+}
+
+function applyColumnStyleFilter(
+  columnKey: string,
+  styleKey: GridStyleFilterKey,
+  tokens: readonly string[],
+) {
+  const api = gridApi.value
+  const currentState = api?.state?.get() ?? activeGridState.value
+  if (!currentState) {
+    return
+  }
+
+  const normalizedFilterModel = normalizeGridFilterModel(currentState.rows.snapshot.filterModel ?? null)
+  const normalizedTokens = [...new Set(tokens.map((token) => token.trim()).filter((token) => token.length > 0))]
+  const syntheticColumnKey = buildSyntheticColumnStyleFilterKey(columnKey, styleKey)
+
+  if (normalizedTokens.length > 0) {
+    normalizedFilterModel.columnFilters = {
+      ...(normalizedFilterModel.columnFilters ?? {}),
+      [syntheticColumnKey]: {
+        kind: 'valueSet',
+        tokens: normalizedTokens,
+      },
+    }
+  } else if (normalizedFilterModel.columnFilters) {
+    delete normalizedFilterModel.columnFilters[syntheticColumnKey]
+    if (Object.keys(normalizedFilterModel.columnFilters).length === 0) {
+      normalizedFilterModel.columnFilters = {}
+    }
+  }
+
+  const nextFilterModel = normalizedFilterModel as DataGridFilterSnapshot
+  const nextState = {
+    ...currentState,
+    rows: {
+      ...currentState.rows,
+      snapshot: {
+        ...currentState.rows.snapshot,
+        filterModel: nextFilterModel,
+      },
+    },
+  }
+
+  activeGridState.value = nextState
+  api?.rows?.setFilterModel(nextFilterModel)
+  api?.state?.set(nextState)
+}
+
+function resolveColumnStyleFilterValueLabel(
+  value: unknown,
+  fallbackLabel: string,
+) {
+  const normalizedColor = normalizeColorPickerValue(value)
+  if (normalizedColor) {
+    return normalizedColor.toUpperCase()
+  }
+
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim()
+  }
+
+  return fallbackLabel
+}
+
+function resolveColumnStyleFilterSwatchBackground(value: unknown) {
+  const normalizedColor = normalizeColorPickerValue(value)
+  if (normalizedColor) {
+    return normalizedColor
+  }
+
+  return 'linear-gradient(135deg, rgba(148, 163, 184, 0.18) 0%, rgba(148, 163, 184, 0.18) 45%, rgba(255, 255, 255, 0.92) 45%, rgba(255, 255, 255, 0.92) 55%, rgba(148, 163, 184, 0.18) 55%, rgba(148, 163, 184, 0.18) 100%)'
+}
+
+const columnStyleFilterMenuCss = computed(() => {
+  const rules: string[] = []
+
+  for (const column of inputColumns.value) {
+    for (const styleKey of ['backgroundColor', 'color'] as const) {
+      const selectedTokens = new Set(resolveColumnStyleFilterTokens(column.key, styleKey))
+      for (const entry of resolveColumnStyleHistogramEntries(column.key, styleKey)) {
+        const token = String(entry.token ?? serializeColumnValueToToken(entry.value))
+        const itemKey = buildColumnStyleFilterItemKey(column.key, styleKey, token)
+        const selector = `[data-datagrid-column-menu-custom-key="${escapeCssSelector(itemKey)}"] > span`
+        const swatchBackground = resolveColumnStyleFilterSwatchBackground(entry.value)
+        const swatchBorder = normalizeColorPickerValue(entry.value)
+          ? 'rgba(44, 59, 51, 0.18)'
+          : 'rgba(148, 163, 184, 0.34)'
+
+        rules.push(`${selector}{display:flex;align-items:center;gap:8px;width:100%;}`)
+        rules.push(`${selector}::before{content:'';display:inline-block;flex:none;width:18px;height:12px;border-radius:4px;border:1px solid ${swatchBorder};background:${swatchBackground};box-shadow:inset 0 0 0 1px rgba(255,255,255,0.22);}`)
+
+        if (selectedTokens.has(token)) {
+          rules.push(`${selector}::after{content:'✓';margin-left:auto;font-size:12px;font-weight:700;color:var(--datagrid-accent-strong);}`)
+        }
+      }
+    }
+  }
+
+  return rules.join('\n')
+})
+
+function buildColumnStyleFilterMenuItems(
+  columnKey: string,
+  styleKey: GridStyleFilterKey,
+  emptyValueLabel: string,
+) {
+  const histogramEntries = resolveColumnStyleHistogramEntries(columnKey, styleKey)
+  const selectedTokens = new Set(resolveColumnStyleFilterTokens(columnKey, styleKey))
+  const hasSelectedTokens = selectedTokens.size > 0
+
+  const items: Array<{
+    key: string
+    label: string
+    disabled?: boolean
+    onSelect?: (context: { closeMenu: () => void }) => void
+  }> = [
+    {
+      key: `${columnKey}:${styleKey}:clear-style-filter`,
+      label: 'Clear color filter',
+      disabled: !hasSelectedTokens,
+      onSelect: ({ closeMenu }) => {
+        applyColumnStyleFilter(columnKey, styleKey, [])
+        closeMenu()
+      },
+    },
+  ]
+
+  if (!histogramEntries.length) {
+    items.push({
+      key: `${columnKey}:${styleKey}:no-colors`,
+      label: 'No colors found',
+      disabled: true,
+    })
+    return items
+  }
+
+  items.push(
+    ...histogramEntries.map((entry) => {
+      const token = String(entry.token ?? serializeColumnValueToToken(entry.value))
+      const isSelected = selectedTokens.has(token)
+      const label = `${resolveColumnStyleFilterValueLabel(entry.value, emptyValueLabel)} (${entry.count})`
+
+      return {
+        key: buildColumnStyleFilterItemKey(columnKey, styleKey, token),
+        label,
+        onSelect: ({ closeMenu }: { closeMenu: () => void }) => {
+          const nextTokens = new Set(selectedTokens)
+          if (isSelected) {
+            nextTokens.delete(token)
+          } else {
+            nextTokens.add(token)
+          }
+
+          applyColumnStyleFilter(columnKey, styleKey, [...nextTokens])
+          closeMenu()
+        },
+      }
+    }),
+  )
+
+  return items
 }
 
 function addSelectedStyleTargets(
@@ -2222,11 +2663,18 @@ const gridToolbarModules = computed<readonly DataGridAppToolbarModule[]>(() => [
 ])
 
 const resolveGridCellStyle: DataGridCellStyleResolver<GridRow> = (
-  _rowNode,
-  rowIndex,
-  _column,
-  columnIndex,
+  rowNode,
+  _rowIndex,
+  column,
+  _columnIndex,
 ) => {
+  const rowId = String(rowNode?.rowId ?? rowNode?.data?.id ?? '')
+  const rowIndex = currentGridStyleRowIndexById.value.get(rowId)
+  const columnIndex = currentGridStyleColumnIndexByKey.value.get(column.key)
+  if (rowIndex === undefined || columnIndex === undefined) {
+    return null
+  }
+
   const style = gridCellStyleMap.value.get(buildSheetStyleCellKey(rowIndex, columnIndex)) ?? null
   return style ? buildSheetCellStyleCssProperties(style) : null
 }
@@ -2330,50 +2778,77 @@ const rowIndexMenu = computed<Exclude<DataGridRowIndexMenuProp, boolean | null>>
 const columnMenu = computed<Exclude<DataGridColumnMenuProp, boolean | null>>(() => ({
   enabled: true,
   trigger: 'button+contextmenu',
-  customItems: [
-    {
-      key: 'column-actions',
-      label: 'Column actions...',
-      kind: 'submenu',
-      placement: 'start',
-      items: [
-        {
-          key: 'rename-column-name',
-          label: 'Rename column',
-          onSelect: ({ columnKey, columnLabel, closeMenu }) => {
-            closeMenu()
-            openRenameColumnDialog(columnKey, columnLabel)
+  columns: Object.fromEntries(
+    inputColumns.value.map((column) => [
+      column.key,
+      {
+        customItems: [
+          {
+            key: 'column-color-filter',
+            label: 'Filter by color',
+            kind: 'submenu' as const,
+            placement: 'before:filter' as const,
+            items: [
+              {
+                key: 'column-fill-color-filter',
+                label: 'Fill color',
+                kind: 'submenu' as const,
+                items: buildColumnStyleFilterMenuItems(column.key, 'backgroundColor', 'No fill'),
+              },
+              {
+                key: 'column-text-color-filter',
+                label: 'Text color',
+                kind: 'submenu' as const,
+                items: buildColumnStyleFilterMenuItems(column.key, 'color', 'Default text'),
+              },
+            ],
           },
-        },
-        {
-          key: 'insert-column-before',
-          label: 'Insert column left',
-          onSelect: ({ columnKey, closeMenu }) => {
-            closeMenu()
-            insertColumn(columnKey, 'before')
+          {
+            key: 'column-actions',
+            label: 'Column actions...',
+            kind: 'submenu' as const,
+            placement: 'start' as const,
+            items: [
+              {
+                key: 'edit-column',
+                label: 'Edit column',
+                onSelect: ({ columnKey, columnLabel, closeMenu }) => {
+                  closeMenu()
+                  openRenameColumnDialog(columnKey, columnLabel)
+                },
+              },
+              {
+                key: 'insert-column-before',
+                label: 'Insert column left',
+                onSelect: ({ columnKey, closeMenu }) => {
+                  closeMenu()
+                  insertColumn(columnKey, 'before')
+                },
+              },
+              {
+                key: 'insert-column-after',
+                label: 'Insert column right',
+                onSelect: ({ columnKey, closeMenu }) => {
+                  closeMenu()
+                  insertColumn(columnKey, 'after')
+                },
+              },
+              {
+                key: 'delete-column',
+                label: 'Delete column',
+                disabled:
+                  (runtimeColumns.value.length ? runtimeColumns.value.length : inputColumns.value.length) <= 1,
+                onSelect: ({ columnKey, closeMenu }) => {
+                  closeMenu()
+                  deleteColumn(columnKey)
+                },
+              },
+            ],
           },
-        },
-        {
-          key: 'insert-column-after',
-          label: 'Insert column right',
-          onSelect: ({ columnKey, closeMenu }) => {
-            closeMenu()
-            insertColumn(columnKey, 'after')
-          },
-        },
-        {
-          key: 'delete-column',
-          label: 'Delete column',
-          disabled:
-            (runtimeColumns.value.length ? runtimeColumns.value.length : inputColumns.value.length) <= 1,
-          onSelect: ({ columnKey, closeMenu }) => {
-            closeMenu()
-            deleteColumn(columnKey)
-          },
-        },
-      ],
-    },
-  ],
+        ],
+      },
+    ]),
+  ),
 }))
 const {
   inlineFormulaAnalysis,
@@ -2819,6 +3294,20 @@ function isSelectionSummaryValueEmpty(value: unknown) {
 
 function formatSelectionSummaryNumber(value: number) {
   return SELECTION_SUMMARY_NUMBER_FORMATTER.format(value)
+}
+
+function formatGridDateTimeValue(value: unknown, fallback = '') {
+  const normalizedValue = typeof value === 'string' ? value.trim() : ''
+  if (!normalizedValue) {
+    return fallback
+  }
+
+  const date = new Date(normalizedValue)
+  if (Number.isNaN(date.getTime())) {
+    return normalizedValue
+  }
+
+  return GRID_DATETIME_FORMATTER.format(date)
 }
 
 function buildPlaceholderSelectionRow(rowIndex: number): GridSourceRowNode {
@@ -3415,11 +3904,15 @@ function resolveGridStructuralRowIndices(
   return fallbackRowIndex >= 0 && fallbackRowIndex < rows.length ? [fallbackRowIndex] : []
 }
 
-function materializeGridRowsUpTo(rows: GridRow[], ensureCount: number) {
+function materializeGridRowsUpTo(
+  rows: GridRow[],
+  ensureCount: number,
+  options?: { includeSystemValues?: boolean },
+) {
   const nextRows = [...rows]
   const normalizedEnsureCount = Math.max(0, Math.trunc(ensureCount))
   while (nextRows.length < normalizedEnsureCount) {
-    nextRows.push(createEmptyRow())
+    nextRows.push(createEmptyRow(options))
   }
   return nextRows
 }
@@ -3463,7 +3956,9 @@ function handleGridStructuralRowAction(context: GridStructuralRowActionContextLi
       context.action === 'insert-row-above'
         ? placeholderRowIndex
         : placeholderRowIndex + 1
-    nextRows = materializeGridRowsUpTo(nextRows, ensureMaterializedCount)
+    nextRows = materializeGridRowsUpTo(nextRows, ensureMaterializedCount, {
+      includeSystemValues: true,
+    })
     const desiredInsertIndex =
       context.action === 'insert-row-above'
         ? placeholderRowIndex
@@ -3490,7 +3985,7 @@ function handleGridStructuralRowAction(context: GridStructuralRowActionContextLi
   nextRows.splice(
     insertAtRowIndex,
     0,
-    ...Array.from({ length: rowCount }, () => createEmptyRow()),
+    ...Array.from({ length: rowCount }, () => createEmptyRow({ includeSystemValues: true })),
   )
 
   const rewrittenStructure = rewriteFormulaReferencesForInsertedRows(
@@ -3922,7 +4417,7 @@ function upsertGridCellValue(
 
   if (didMaterializeMissingRow) {
     while (nextRows.length <= targetCell.rowIndex) {
-      nextRows.push(createEmptyRow())
+      nextRows.push(createEmptyRow({ includeSystemValues: true }))
     }
 
     targetRowIndex = Math.max(0, Math.min(targetCell.rowIndex, nextRows.length - 1))
@@ -4352,6 +4847,67 @@ function createInsertedColumn(currentColumns: SheetGridColumn[]): SheetGridColum
   }
 }
 
+function resolveSystemGridColumnKind(
+  column: Pick<SheetGridColumn, 'key' | 'column_type' | 'settings'>,
+): 'created_by' | 'created_at' | 'updated_by' | 'updated_at' | null {
+  if (
+    column.column_type === 'created_by' ||
+    column.column_type === 'created_at' ||
+    column.column_type === 'updated_by' ||
+    column.column_type === 'updated_at'
+  ) {
+    return column.column_type
+  }
+
+  const legacyKey = column.settings.system === true ? column.key : ''
+  if (
+    legacyKey === 'created_by' ||
+    legacyKey === 'created_at' ||
+    legacyKey === 'updated_by' ||
+    legacyKey === 'updated_at'
+  ) {
+    return legacyKey
+  }
+
+  return null
+}
+
+function resolveDraftCreatedByValue() {
+  return authStore.currentUser?.full_name?.trim() || authStore.currentUser?.email?.trim() || ''
+}
+
+function buildDraftSystemRowValues() {
+  const activeColumns = runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value
+  const systemUserValue = resolveDraftCreatedByValue()
+  const systemDateTimeValue = new Date().toISOString()
+  const nextValues: Record<string, unknown> = {
+    [GRID_ROW_CREATED_BY_META_KEY]: systemUserValue,
+    [GRID_ROW_CREATED_AT_META_KEY]: systemDateTimeValue,
+    [GRID_ROW_UPDATED_BY_META_KEY]: systemUserValue,
+    [GRID_ROW_UPDATED_AT_META_KEY]: systemDateTimeValue,
+  }
+
+  for (const column of activeColumns) {
+    const systemKind = resolveSystemGridColumnKind(column)
+    if (!systemKind) {
+      continue
+    }
+
+    if (systemKind === 'created_by' || systemKind === 'updated_by') {
+      if (systemUserValue) {
+        nextValues[column.key] = systemUserValue
+      }
+      continue
+    }
+
+    if (systemKind === 'created_at' || systemKind === 'updated_at') {
+      nextValues[column.key] = systemDateTimeValue
+    }
+  }
+
+  return nextValues
+}
+
 function nextDefaultColumnLabel(columns: SheetGridColumn[]) {
   let highestIndex = 0
 
@@ -4374,17 +4930,93 @@ function clearRenameColumnDialogState() {
   renameColumnTargetKey.value = null
   renameColumnInitialValue.value = ''
   renameColumnInitialType.value = 'text'
+  renameColumnInitialOptions.value = []
 }
 
 function openRenameColumnDialog(columnKey: string, initialValue?: string) {
+  const currentColumn = readGridColumns().find((column) => column.key === columnKey) ?? null
   renameColumnTargetKey.value = columnKey
   renameColumnInitialValue.value = initialValue ?? resolveColumnLabel(columnKey)
-  renameColumnInitialType.value =
-    readGridColumns().find((column) => column.key === columnKey)?.column_type ?? 'text'
+  renameColumnInitialType.value = currentColumn?.column_type ?? 'text'
+  renameColumnInitialOptions.value = currentColumn
+    ? resolveColumnOptionsForType(currentColumn, currentColumn.column_type)
+    : []
   renameColumnDialogOpen.value = true
 }
 
-function handleColumnRename(payload: { name: string; columnType: GridColumnType }) {
+function normalizeColumnOptions(value: unknown) {
+  return [...new Set(normalizeStringArray(value))]
+}
+
+function isSystemGridColumnType(columnType: GridColumnType) {
+  return GRID_SYSTEM_COLUMN_TYPES.has(columnType)
+}
+
+function hasReplaceableGridCellValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return false
+  }
+
+  if (typeof value === 'string') {
+    return value.trim().length > 0
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0
+  }
+
+  return true
+}
+
+function columnHasUserValues(rows: GridRow[], columnKey: string) {
+  return rows.some((row) => {
+    if (!Object.prototype.hasOwnProperty.call(row, columnKey)) {
+      return false
+    }
+
+    return hasReplaceableGridCellValue(row[columnKey])
+  })
+}
+
+function clearColumnValues(rows: GridRow[], columnKey: string) {
+  return rows.map((row) => {
+    if (!Object.prototype.hasOwnProperty.call(row, columnKey)) {
+      return row
+    }
+
+    const nextRow: GridRow = { ...row }
+    delete nextRow[columnKey]
+    return nextRow
+  })
+}
+
+function resolveColumnOptionsForType(
+  currentColumn: SheetGridColumn,
+  nextColumnType: GridColumnType,
+  explicitOptions?: readonly string[] | null,
+) {
+  if (nextColumnType !== 'select') {
+    return []
+  }
+
+  const normalizedExplicitOptions = explicitOptions ? normalizeColumnOptions(explicitOptions) : []
+  if (normalizedExplicitOptions.length > 0) {
+    return normalizedExplicitOptions
+  }
+
+  const normalizedCurrentOptions = normalizeColumnOptions(currentColumn.options)
+  if (normalizedCurrentOptions.length > 0) {
+    return normalizedCurrentOptions
+  }
+
+  return []
+}
+
+function handleColumnRename(payload: {
+  name: string
+  columnType: GridColumnType
+  options: string[]
+}) {
   const columnKey = renameColumnTargetKey.value
   renameColumnDialogOpen.value = false
 
@@ -4393,14 +5025,58 @@ function handleColumnRename(payload: { name: string; columnType: GridColumnType 
     return
   }
 
-  handleColumnNameRename(columnKey, payload.name, payload.columnType)
+  const currentColumns = readGridColumns()
+  const currentColumn = currentColumns.find((column) => column.key === columnKey) ?? null
+  const normalizedColumnType = normalizeGridColumnType(payload.columnType, payload.columnType)
+  if (
+    currentColumn &&
+    !isSystemGridColumnType(currentColumn.column_type) &&
+    isSystemGridColumnType(normalizedColumnType) &&
+    columnHasUserValues(readGridRows(), columnKey)
+  ) {
+    pendingSystemColumnReplacement.value = {
+      columnKey,
+      name: payload.name,
+      columnType: normalizedColumnType,
+      options: [...payload.options],
+    }
+    systemColumnReplacementDialogOpen.value = true
+    clearRenameColumnDialogState()
+    return
+  }
+
+  handleColumnNameRename(columnKey, payload.name, payload.columnType, payload.options)
   clearRenameColumnDialogState()
+}
+
+function closeSystemColumnReplacementDialog() {
+  systemColumnReplacementDialogOpen.value = false
+  pendingSystemColumnReplacement.value = null
+}
+
+function confirmSystemColumnReplacement() {
+  const pendingReplacement = pendingSystemColumnReplacement.value
+  closeSystemColumnReplacementDialog()
+
+  if (!pendingReplacement) {
+    return
+  }
+
+  handleColumnNameRename(
+    pendingReplacement.columnKey,
+    pendingReplacement.name,
+    pendingReplacement.columnType,
+    pendingReplacement.options,
+    { clearExistingValues: true },
+  )
 }
 
 function handleColumnNameRename(
   columnKey: string,
   nextName: string,
   nextColumnType: GridColumnType,
+  nextOptions?: readonly string[] | null,
+  options?: { clearExistingValues?: boolean },
 ) {
   const normalizedName = nextName.trim()
   if (!normalizedName) {
@@ -4419,6 +5095,8 @@ function handleColumnNameRename(
 
   const normalizedColumnType = normalizeGridColumnType(nextColumnType, nextColumnType)
   const resolvedNextDataType = resolveGridColumnDataTypeForColumnType(normalizedColumnType)
+  const nextEditable = !isSystemGridColumnType(normalizedColumnType)
+  const normalizedNextOptions = resolveColumnOptionsForType(currentColumn, normalizedColumnType, nextOptions)
   const previousReferenceName = resolveGridColumnFormulaReferenceName(currentColumn)
   const didRenameMetadata =
     currentColumn.label !== normalizedName || previousReferenceName !== normalizedName
@@ -4428,7 +5106,9 @@ function handleColumnNameRename(
       (column.label !== normalizedName ||
         resolveGridColumnFormulaReferenceName(column) !== normalizedName ||
         column.column_type !== normalizedColumnType ||
-        column.data_type !== resolvedNextDataType),
+        column.data_type !== resolvedNextDataType ||
+          column.editable !== nextEditable ||
+        JSON.stringify(normalizeColumnOptions(column.options)) !== JSON.stringify(normalizedNextOptions)),
   )
 
   if (!didChange) {
@@ -4436,6 +5116,7 @@ function handleColumnNameRename(
   }
 
   const currentRows = readGridRows()
+  const effectiveRows = options?.clearExistingValues ? clearColumnValues(currentRows, columnKey) : currentRows
   const beforeSnapshot = captureGridHistorySnapshot()
   const metadataColumns = didRenameMetadata
     ? mutateSpreadsheetSheetColumns(currentColumns, (model) => {
@@ -4453,13 +5134,13 @@ function handleColumnNameRename(
     didRenameMetadata && previousReferenceName !== normalizedName
       ? rewriteFormulaReferencesForRenamedColumnReferenceName(
           currentColumns,
-          currentRows,
+          effectiveRows,
           previousReferenceName,
           normalizedName,
         )
       : {
           columns: currentColumns,
-          rows: currentRows,
+          rows: effectiveRows,
         }
   const nextColumns = rewrittenStructure.columns.map((column, index) => ({
     ...column,
@@ -4474,6 +5155,14 @@ function handleColumnNameRename(
       column.key === columnKey
         ? resolvedNextDataType
         : metadataColumns[index]?.data_type ?? column.data_type,
+    editable:
+      column.key === columnKey
+        ? nextEditable
+        : metadataColumns[index]?.editable ?? column.editable,
+    options:
+      column.key === columnKey
+        ? [...normalizedNextOptions]
+        : [...(metadataColumns[index]?.options ?? column.options)],
   }))
 
   applyGridStructureChange(nextColumns, rewrittenStructure.rows, readGridStyles())
@@ -4561,6 +5250,11 @@ function getSheetDraftContext(): SheetDraftContext {
   }
 }
 
+function resolveCurrentGridRowById(rowId: string) {
+  const activeRows = runtimeRows.value.length ? runtimeRows.value : inputRows.value
+  return activeRows.find((row) => String(row.id ?? '') === rowId) ?? null
+}
+
 function readGridRows() {
   const sourceRows = gridRowModel.value?.getSourceRows()
   if (!sourceRows?.length) {
@@ -4570,7 +5264,9 @@ function readGridRows() {
   return sourceRows.map((rowNode) => {
     const rowData = isRecord(rowNode.data) ? { ...rowNode.data } : {}
     const rowId = rowData.id ?? rowNode.rowId ?? createClientRowId()
+    const persistedRow = resolveCurrentGridRowById(String(rowId))
     return {
+      ...(persistedRow ? { ...persistedRow } : {}),
       ...rowData,
       id: String(rowId),
     }
@@ -4598,6 +5294,7 @@ function readGridColumns(options?: { includeLayoutWidths?: boolean }) {
   return [...orderedColumns, ...remainingColumns].map((column) => {
     const meta = isRecord(column.column.meta) ? column.column.meta : {}
     const settings = isRecord(meta.settings) ? { ...meta.settings } : {}
+    const resolvedColumnType = normalizeGridColumnType(meta.columnType, column.column.dataType)
     const formulaAlias = normalizeOptionalString(
       meta.formulaAlias ?? settings.formulaAlias ?? settings.formula_alias,
     )
@@ -4613,7 +5310,7 @@ function readGridColumns(options?: { includeLayoutWidths?: boolean }) {
       label: asString(column.column.label).trim() || column.key,
       formula_alias: formulaAlias,
       data_type: normalizeGridColumnDataType(column.column.dataType, meta.dataType),
-      column_type: normalizeGridColumnType(meta.columnType, column.column.dataType),
+      column_type: resolvedColumnType,
       width: includeLayoutWidths
         ? normalizeSheetColumnWidth(column.state.width) ??
           localSheetColumnWidths.value[column.key] ??
@@ -4621,7 +5318,9 @@ function readGridColumns(options?: { includeLayoutWidths?: boolean }) {
           null
         : sourceWidthByKey.get(column.key) ?? null,
       editable:
-        typeof meta.editable === 'boolean'
+        isSystemGridColumnType(resolvedColumnType)
+          ? false
+          : typeof meta.editable === 'boolean'
           ? meta.editable
           : Boolean(column.column.capabilities?.editable),
       computed: Boolean(meta.computed) || Boolean(normalizeFormulaExpression(meta.expression)),
@@ -4630,6 +5329,46 @@ function readGridColumns(options?: { includeLayoutWidths?: boolean }) {
       settings,
     }
   })
+}
+
+function resolveCurrentGridColumn(columnKey: string) {
+  const activeColumns = runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value
+  return activeColumns.find((column) => column.key === columnKey) ?? null
+}
+
+function resolveSystemColumnRowValue(
+  row: GridRow | undefined,
+  rowId: string | null,
+  columnKey: string,
+) {
+  const column = resolveCurrentGridColumn(columnKey)
+  if (!column) {
+    return null
+  }
+
+  const sourceRow = row ?? (rowId ? resolveCurrentGridRowById(rowId) : null)
+  if (!sourceRow) {
+    return null
+  }
+
+  const systemKind = resolveSystemGridColumnKind(column)
+  if (systemKind === 'created_by') {
+    return sourceRow[GRID_ROW_CREATED_BY_META_KEY] ?? null
+  }
+
+  if (systemKind === 'created_at') {
+    return sourceRow[GRID_ROW_CREATED_AT_META_KEY] ?? null
+  }
+
+  if (systemKind === 'updated_by') {
+    return sourceRow[GRID_ROW_UPDATED_BY_META_KEY] ?? null
+  }
+
+  if (systemKind === 'updated_at') {
+    return sourceRow[GRID_ROW_UPDATED_AT_META_KEY] ?? null
+  }
+
+  return null
 }
 
 function resolveRenderedCellState(
@@ -4645,9 +5384,12 @@ function resolveRenderedCellState(
       : row?.id !== null && row?.id !== undefined
         ? String(row.id)
         : null
-  const rawValue = row?.[columnKey]
+  const resolvedSystemValue = resolveSystemColumnRowValue(row, resolvedRowId, columnKey)
+  const rawValue = row?.[columnKey] ?? resolvedSystemValue
   const hasOwnCellValue = Boolean(
-    row && Object.prototype.hasOwnProperty.call(row, columnKey),
+    (row && Object.prototype.hasOwnProperty.call(row, columnKey)) ||
+      resolvedSystemValue !== null &&
+      resolvedSystemValue !== undefined,
   )
   const formulaResult =
     resolvedRowId !== null
@@ -4690,12 +5432,16 @@ function resolveRenderedCellState(
   }
 
   return {
-    value: deferredFormulaResult?.value ?? (hasOwnCellValue ? fallbackValue : null),
+    value: deferredFormulaResult?.value ?? (hasOwnCellValue ? (rawValue ?? fallbackValue) : null),
     displayValue:
       deferredFormulaResult?.displayValue ??
       (hasOwnCellValue
-        ? fallbackDisplayValue ??
-          (fallbackValue === null || fallbackValue === undefined ? '' : String(fallbackValue))
+        ? typeof rawValue === 'string'
+          ? rawValue
+          : fallbackDisplayValue ??
+            (rawValue === null || rawValue === undefined
+              ? (fallbackValue === null || fallbackValue === undefined ? '' : String(fallbackValue))
+              : String(rawValue))
         : ''),
     error: deferredFormulaResult?.error ?? null,
   }
@@ -4799,16 +5545,44 @@ function renderFormulaHoverIndicator(formula: string) {
   )
 }
 
+function resolveGridCellHorizontalAlign(
+  rowId: string | number | null | undefined,
+  columnKey: string,
+  column: SheetGridColumn,
+): SheetHorizontalAlign {
+  const resolvedRowId = rowId !== null && rowId !== undefined ? String(rowId) : ''
+  const rowIndex = currentGridStyleRowIndexById.value.get(resolvedRowId)
+  const columnIndex = currentGridStyleColumnIndexByKey.value.get(columnKey)
+  if (rowIndex !== undefined && columnIndex !== undefined) {
+    const style = gridCellStyleMap.value.get(buildSheetStyleCellKey(rowIndex, columnIndex))
+    if (style?.horizontal_align) {
+      return style.horizontal_align
+    }
+  }
+
+  if (column.column_type === 'percent' || column.data_type === 'number') {
+    return 'right'
+  }
+
+  return 'left'
+}
+
 function wrapFormulaCellContent(
   content: ReturnType<typeof h>,
   hasFormula: boolean,
   formula: string | null,
+  horizontalAlign: SheetHorizontalAlign = 'left',
 ) {
   if (!hasFormula) {
     return content
   }
 
-  return h('div', { class: 'sheet-cell__formula-shell' }, [
+  return h('div', {
+    class: [
+      'sheet-cell__formula-shell',
+      horizontalAlign === 'right' ? 'sheet-cell__formula-shell--align-end' : null,
+    ],
+  }, [
     h('div', { class: 'sheet-cell__formula-content' }, [content]),
     renderFormulaHoverIndicator(formula ?? ''),
   ])
@@ -4828,6 +5602,15 @@ const readGridSelectionCell = defineDataGridSelectionCellReader<GridRow>()((rowN
 })
 
 const readGridFilterCell = defineDataGridFilterCellReader<GridRow>()((rowNode, columnKey) => {
+  const syntheticStyleFilter = parseSyntheticColumnStyleFilterKey(columnKey)
+  if (syntheticStyleFilter) {
+    return resolveGridCellStyleFilterValueByRowId(
+      String(rowNode?.rowId ?? rowNode?.data?.id ?? ''),
+      syntheticStyleFilter.columnKey,
+      syntheticStyleFilter.styleKey,
+    )
+  }
+
   const row = rowNode?.data
   const cellState = resolveRenderedCellState(
     rowNode?.rowId,
@@ -4839,6 +5622,28 @@ const readGridFilterCell = defineDataGridFilterCellReader<GridRow>()((rowNode, c
 
   return cellState.value
 })
+
+const readGridFilterCellStyle: DataGridFilterCellStyleReader<GridRow> = (rowNode, columnKey, styleKey) => {
+  const rowId = String(rowNode?.rowId ?? rowNode?.data?.id ?? '')
+  const rowIndex = currentGridStyleRowIndexById.value.get(rowId)
+  const columnIndex = currentGridStyleColumnIndexByKey.value.get(columnKey)
+  if (rowIndex === undefined || columnIndex === undefined) {
+    return null
+  }
+
+  const style = gridCellStyleMap.value.get(buildSheetStyleCellKey(rowIndex, columnIndex))
+  if (!style) {
+    return null
+  }
+
+  const cssProperties = buildSheetCellStyleCssProperties(style) as Record<string, unknown>
+  return cssProperties[styleKey] ?? null
+}
+
+const clientRowModelOptions = computed<DataGridAppClientRowModelOptions<GridRow>>(() => ({
+  ...BASE_CLIENT_ROW_MODEL_OPTIONS,
+  readFilterCellStyle: readGridFilterCellStyle,
+}))
 
 function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridRow> {
   const dataType = resolveDataGridFormatType(column)
@@ -4861,7 +5666,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
     capabilities: {
       sortable: true,
       filterable: true,
-      editable: column.editable && !isFormulaColumn,
+      editable: column.editable && !isFormulaColumn && !isSystemGridColumnType(column.column_type),
       groupable: true,
       pivotable: true,
       aggregatable: dataType === 'number',
@@ -4872,7 +5677,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
       columnType: column.column_type,
       dataType: column.data_type,
       formulaAlias,
-      editable: column.editable && !isFormulaColumn,
+      editable: column.editable && !isFormulaColumn && !isSystemGridColumnType(column.column_type),
       computed: column.computed || Boolean(expression),
       expression,
       options: [...column.options],
@@ -4894,6 +5699,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
       const typedRow = row as GridRow | undefined
       const hasFormula = cellHasSpreadsheetFormula(typedRow, column.key)
       const rawFormulaValue = hasFormula ? String(typedRow?.[column.key] ?? '') : null
+      const horizontalAlign = resolveGridCellHorizontalAlign(rowNode.rowId, column.key, column)
 
       const cellState = resolveRenderedCellState(
         rowNode.rowId,
@@ -4910,7 +5716,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             class: ['sheet-cell__title', cellState.error ? 'sheet-cell__formula-error' : null],
           },
           cellState.displayValue || 'Untitled task',
-        ), hasFormula, rawFormulaValue)
+        ), hasFormula, rawFormulaValue, horizontalAlign)
       }
 
       if (column.key === 'owner') {
@@ -4925,7 +5731,26 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             },
             owner,
           ),
-        ]), hasFormula, rawFormulaValue)
+        ]), hasFormula, rawFormulaValue, horizontalAlign)
+      }
+
+      if (
+        column.column_type === 'user' ||
+        column.column_type === 'created_by' ||
+        column.column_type === 'updated_by'
+      ) {
+        const owner = cellState.displayValue || 'Unknown user'
+
+        return wrapFormulaCellContent(h('div', { class: 'sheet-cell sheet-cell--owner' }, [
+          h('span', { class: 'sheet-cell__avatar' }, initials(owner)),
+          h(
+            'span',
+            {
+              class: ['sheet-cell__value', cellState.error ? 'sheet-cell__formula-error' : null],
+            },
+            owner,
+          ),
+        ]), hasFormula, rawFormulaValue, horizontalAlign)
       }
 
       if (column.key === 'status') {
@@ -4942,7 +5767,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             ],
           },
           status,
-        ), hasFormula, rawFormulaValue)
+        ), hasFormula, rawFormulaValue, horizontalAlign)
       }
 
       if (column.key === 'timeline') {
@@ -4952,7 +5777,21 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             class: ['sheet-date-pill', cellState.error ? 'sheet-date-pill--error' : null],
           },
           cellState.displayValue || 'TBD',
-        ), hasFormula, rawFormulaValue)
+        ), hasFormula, rawFormulaValue, horizontalAlign)
+      }
+
+      if (
+        column.column_type === 'datetime' ||
+        column.column_type === 'created_at' ||
+        column.column_type === 'updated_at'
+      ) {
+        return wrapFormulaCellContent(h(
+          'span',
+          {
+            class: ['sheet-date-pill', cellState.error ? 'sheet-date-pill--error' : null],
+          },
+          formatGridDateTimeValue(cellState.value ?? cellState.displayValue, 'TBD'),
+        ), hasFormula, rawFormulaValue, horizontalAlign)
       }
 
       if (column.key === 'progress') {
@@ -4964,7 +5803,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             class: ['sheet-progress__value', cellState.error ? 'sheet-cell__formula-error' : null],
           },
           `${progress}%`,
-        ), hasFormula, rawFormulaValue)
+        ), hasFormula, rawFormulaValue, horizontalAlign)
       }
 
       return wrapFormulaCellContent(h(
@@ -4973,7 +5812,7 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
           class: ['sheet-cell__value', cellState.error ? 'sheet-cell__formula-error' : null],
         },
         cellState.displayValue,
-      ), hasFormula, rawFormulaValue)
+      ), hasFormula, rawFormulaValue, horizontalAlign)
     },
   }
 }
@@ -5012,6 +5851,10 @@ function resolveDataGridFormatType(column: SheetGridColumn) {
     return 'percent' as const
   }
 
+  if (column.column_type === 'created_at' || column.column_type === 'updated_at') {
+    return 'datetime' as const
+  }
+
   if (column.column_type === 'datetime') {
     return 'datetime' as const
   }
@@ -5026,6 +5869,10 @@ function resolveDataGridFormatType(column: SheetGridColumn) {
 function resolveDataGridCellType(column: SheetGridColumn) {
   if (column.column_type === 'checkbox') {
     return 'checkbox' as const
+  }
+
+  if (column.column_type === 'created_at' || column.column_type === 'updated_at') {
+    return 'datetime' as const
   }
 
   if (column.column_type === 'select') {
@@ -5194,9 +6041,10 @@ function createClientRowId() {
   return `rec_${Math.random().toString(36).slice(2, 10)}`
 }
 
-function createEmptyRow(): GridRow {
+function createEmptyRow(options?: { includeSystemValues?: boolean }): GridRow {
   return {
     id: createClientRowId(),
+    ...(options?.includeSystemValues ? buildDraftSystemRowValues() : {}),
   }
 }
 
@@ -5340,6 +6188,8 @@ defineExpose<SheetStageHandle>({
 
 <template>
   <section class="sheet-stage" :style="{ '--workspace-accent': workspaceColor }">
+    <component :is="'style'">{{ columnStyleFilterMenuCss }}</component>
+
     <header class="sheet-stage__header">
       <div class="sheet-stage__identity">
         <div class="sheet-stage__header-copy">
@@ -5422,7 +6272,7 @@ defineExpose<SheetStageHandle>({
             :column-menu="columnMenu"
             :cell-menu="cellMenu"
             :row-index-menu="rowIndexMenu"
-            :client-row-model-options="CLIENT_ROW_MODEL_OPTIONS"
+            :client-row-model-options="clientRowModelOptions"
             :read-selection-cell="readGridSelectionCell"
             :read-filter-cell="readGridFilterCell"
             :cell-style="resolveGridCellStyle"
@@ -5582,15 +6432,28 @@ defineExpose<SheetStageHandle>({
 
     <RenameColumnDialog
       v-model="renameColumnDialogOpen"
-      title="Column Name"
-      description="Update the visible column title and the formula-facing column name together. Closing brackets are not allowed."
-      confirm-label="Save name"
+      title="Edit Column"
+      description="Update the visible column title, column type, and dropdown options together. Closing brackets are not allowed."
+      confirm-label="Save column"
       eyebrow="Column"
       :initial-name="renameColumnInitialValue"
       :initial-column-type="renameColumnInitialType"
+      :initial-options="renameColumnInitialOptions"
       :name-validator="renameColumnDialogValidator"
       :column-type-options="GRID_COLUMN_TYPE_OPTIONS"
       @submit="handleColumnRename"
+    />
+
+    <ConfirmDialog
+      :open="systemColumnReplacementDialogOpen"
+      eyebrow="Replace values"
+      title="Replace existing column values?"
+      description="This column already contains data. Switching it to a Created/Updated field will delete the current values in this column and replace them with system values."
+      confirm-label="Replace values"
+      cancel-label="Cancel"
+      :destructive="true"
+      @close="closeSystemColumnReplacementDialog"
+      @confirm="confirmSystemColumnReplacement"
     />
 
   </section>

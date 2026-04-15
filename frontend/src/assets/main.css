@@ -296,27 +296,6 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-.workspace-pane-header__account-row {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.workspace-pane-header__user {
-  max-width: 180px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(31, 143, 82, 0.08);
-  color: var(--color-text-strong);
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .workspace-pane-header__primary-action {
   justify-self: start;
 }
@@ -1589,6 +1568,21 @@ button:disabled {
   width: 100%;
   min-width: 0;
   padding-right: 18px;
+  transition: padding-right 140ms ease;
+}
+
+.sheet-cell__formula-shell--align-end {
+  padding-right: 18px;
+}
+
+.sheet-grid-stage__grid .grid-cell:hover .sheet-cell__formula-shell--align-end,
+.sheet-grid-stage__grid .grid-cell:focus-within .sheet-cell__formula-shell--align-end {
+  padding-right: 36px;
+}
+
+.sheet-grid-stage__grid .grid-cell--editing .sheet-cell__formula-shell--align-end,
+.sheet-grid-stage__grid .grid-cell--formula-origin .sheet-cell__formula-shell--align-end {
+  padding-right: 18px;
 }
 
 .sheet-cell__formula-content {
@@ -2295,7 +2289,6 @@ button:disabled {
     justify-items: start;
   }
 
-  .workspace-pane-header__account-row,
   .workspace-pane-header__primary-action {
     justify-self: start;
   }

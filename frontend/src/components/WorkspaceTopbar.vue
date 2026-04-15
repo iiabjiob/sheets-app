@@ -22,13 +22,11 @@ const emit = defineEmits<{
   moveSheet: [direction: MoveDirection]
   deleteSheet: []
   deleteWorkspace: []
-  logout: []
 }>()
 
 const props = defineProps<{
   workspaceName: string
   workspaceDescription: string
-  currentUserName: string
   workspaceCount: number
   totalSheetCount: number
   hasActiveWorkspace: boolean
@@ -118,11 +116,6 @@ function handlePrimaryAction() {
     <p class="workspace-pane-header__support">{{ workspaceDescription }}</p>
 
     <div class="workspace-pane-header__actions">
-      <div class="workspace-pane-header__account-row">
-        <span class="workspace-pane-header__user">{{ currentUserName }}</span>
-        <UiButton variant="ghost" size="sm" @click="emit('logout')">Sign out</UiButton>
-      </div>
-
       <UiButton class="workspace-pane-header__primary-action" variant="primary" size="sm" @click="handlePrimaryAction">
         {{ primaryActionLabel }}
       </UiButton>

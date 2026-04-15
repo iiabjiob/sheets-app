@@ -16,6 +16,14 @@ import type { WorkspaceSummary } from '@/types/workspace'
 import { dialogOverlayTarget } from '@/overlay/hosts'
 import { flattenSheets, sortSheetsByUpdatedAt, type IndexedSheet } from '@/utils/workspaceIndex'
 
+const props = defineProps<{
+  currentUserName: string
+}>()
+
+const emit = defineEmits<{
+  logout: []
+}>()
+
 type NavKey = 'home' | 'workspaces' | 'browse' | 'recents' | 'favorites'
 
 interface RouteItem {
@@ -140,6 +148,22 @@ function formatUpdatedAt(value: string) {
     minute: '2-digit',
   }).format(new Date(value))
 }
+
+const currentUserInitials = computed(() => {
+  const tokens = props.currentUserName
+    .split(/\s+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+  if (!tokens.length) {
+    return 'A'
+  }
+
+  return tokens
+    .slice(0, 2)
+    .map((token) => token.charAt(0).toUpperCase())
+    .join('')
+})
 </script>
 
 <template>
@@ -221,6 +245,23 @@ function formatUpdatedAt(value: string) {
       </template>
     </div>
 
+    <div class="app-rail__cluster app-rail__cluster--bottom">
+      <UiMenu placement="right" align="end" :gutter="10">
+        <UiMenuTrigger as-child>
+          <button class="app-rail__item app-rail__account-trigger" type="button" aria-haspopup="menu">
+            <span class="app-rail__account-avatar">{{ currentUserInitials }}</span>
+            <span class="app-rail__item-label app-rail__account-label">{{ currentUserName }}</span>
+          </button>
+        </UiMenuTrigger>
+
+        <UiMenuContent class="app-rail__menu-content app-rail__menu-content--account">
+          <UiMenuLabel>{{ currentUserName }}</UiMenuLabel>
+          <UiMenuSeparator />
+          <UiMenuItem @select="emit('logout')">Sign out</UiMenuItem>
+        </UiMenuContent>
+      </UiMenu>
+    </div>
+
     <Teleport :to="dialogOverlayTarget">
       <transition name="dialog-fade">
         <div v-if="searchOpen" class="dialog-backdrop" @click.self="closeSearch">
@@ -280,6 +321,31 @@ function formatUpdatedAt(value: string) {
 <style scoped>
 .app-rail__menu-content--notifications {
   width: 280px;
+}
+
+.app-rail__menu-content--account {
+  width: 220px;
+}
+
+.app-rail__account-trigger {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.app-rail__account-avatar {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.app-rail__account-label {
+  max-width: 100%;
 }
 
 .app-rail__menu-title,

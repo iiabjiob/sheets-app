@@ -7,19 +7,90 @@ from app.services.workspace.constants import WORKSPACE_COLORS
 from app.services.workspace.ordering import sort_columns, sort_records, sort_sheets, sort_workbooks
 from app.services.workspace.validation import sanitize_formula_alias
 
+SYSTEM_GRID_COLUMN_TYPES = frozenset({"created_by", "created_at", "updated_by", "updated_at"})
+ROW_CREATED_BY_META_KEY = "__record_created_by"
+ROW_CREATED_AT_META_KEY = "__record_created_at"
+ROW_UPDATED_BY_META_KEY = "__record_updated_by"
+ROW_UPDATED_AT_META_KEY = "__record_updated_at"
+
 
 def column_type_to_grid_data_type(value: str) -> str:
     if value in {"number", "duration", "percent", "formula"}:
         return "number"
-    if value in {"date", "datetime"}:
+    if value in {"date", "datetime", "created_at", "updated_at"}:
         return "date"
     if value == "status":
         return "status"
     return "text"
 
 
-def row_payload(record: SheetRecordModel, *, writable_column_keys: set[str] | None = None) -> dict[str, object]:
-    payload: dict[str, object] = {"id": record.id}
+def resolve_system_grid_column_kind(column: dict[str, object]) -> str | None:
+    column_type = str(column.get("column_type") or "").strip()
+    if column_type in SYSTEM_GRID_COLUMN_TYPES:
+        return column_type
+
+    settings = column.get("settings") if isinstance(column.get("settings"), dict) else {}
+    if settings.get("system") is True:
+        legacy_key = str(column.get("key") or "").strip()
+        if legacy_key in SYSTEM_GRID_COLUMN_TYPES:
+            return legacy_key
+
+    return None
+
+
+def resolve_record_creator_name(record: SheetRecordModel) -> str:
+    creator = getattr(record, "creator", None)
+    if creator is not None:
+        full_name = str(getattr(creator, "full_name", "") or "").strip()
+        if full_name:
+            return full_name
+
+        email = str(getattr(creator, "email", "") or "").strip()
+        if email:
+            return email
+
+    return str(record.created_by)
+
+
+def resolve_record_updater_name(record: SheetRecordModel) -> str:
+    updater = getattr(record, "updater", None)
+    if updater is not None:
+        full_name = str(getattr(updater, "full_name", "") or "").strip()
+        if full_name:
+            return full_name
+
+        email = str(getattr(updater, "email", "") or "").strip()
+        if email:
+            return email
+
+    return str(record.updated_by)
+
+
+def resolve_system_row_value(record: SheetRecordModel, kind: str) -> object:
+    if kind == "created_by":
+        return resolve_record_creator_name(record)
+    if kind == "created_at":
+        return record.created_at.isoformat()
+    if kind == "updated_by":
+        return resolve_record_updater_name(record)
+    if kind == "updated_at":
+        return record.updated_at.isoformat()
+    return None
+
+
+def row_payload(
+    record: SheetRecordModel,
+    *,
+    writable_column_keys: set[str] | None = None,
+    system_columns: dict[str, str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": record.id,
+        ROW_CREATED_BY_META_KEY: resolve_record_creator_name(record),
+        ROW_CREATED_AT_META_KEY: record.created_at.isoformat(),
+        ROW_UPDATED_BY_META_KEY: resolve_record_updater_name(record),
+        ROW_UPDATED_AT_META_KEY: record.updated_at.isoformat(),
+    }
     row_values = deepcopy(record.values_json or {})
 
     if writable_column_keys is not None:
@@ -28,6 +99,10 @@ def row_payload(record: SheetRecordModel, *, writable_column_keys: set[str] | No
         }
 
     payload.update(row_values)
+
+    for column_key, system_kind in sorted((system_columns or {}).items()):
+        payload[column_key] = resolve_system_row_value(record, system_kind)
+
     return payload
 
 
@@ -49,6 +124,7 @@ def serialize_sheet_column(column: SheetColumnModel) -> dict[str, object]:
     settings = deepcopy(column.settings_json or {})
     raw_formula_alias = settings.pop("formulaAlias", settings.pop("formula_alias", None))
     formula_alias = sanitize_formula_alias(raw_formula_alias)
+    is_system_column = column.type in SYSTEM_GRID_COLUMN_TYPES
 
     return {
         "key": column.key,
@@ -57,7 +133,7 @@ def serialize_sheet_column(column: SheetColumnModel) -> dict[str, object]:
         "data_type": column_type_to_grid_data_type(column.type),
         "column_type": column.type,
         "width": column.width,
-        "editable": column.editable,
+        "editable": False if is_system_column else column.editable,
         "computed": column.computed,
         "expression": column.expression,
         "options": column_options(settings),
@@ -84,14 +160,29 @@ def serialize_sheet(sheet: SheetModel, *, include_grid: bool = False) -> dict[st
 
     if include_grid:
         ordered_columns = sort_columns(sheet.columns)
+        serialized_columns = [serialize_sheet_column(column) for column in ordered_columns]
         writable_column_keys = {
-            column.key
-            for column in ordered_columns
-            if not column.computed and not (column.expression or "").strip()
+            str(column.get("key") or "")
+            for column in serialized_columns
+            if str(column.get("key") or "")
+            and not bool(column.get("computed"))
+            and not str(column.get("expression") or "").strip()
+            and resolve_system_grid_column_kind(column) is None
         }
-        data["columns"] = [serialize_sheet_column(column) for column in ordered_columns]
+        system_columns = {
+            str(column.get("key") or ""): system_kind
+            for column in serialized_columns
+            if str(column.get("key") or "")
+            for system_kind in [resolve_system_grid_column_kind(column)]
+            if system_kind is not None
+        }
+        data["columns"] = serialized_columns
         data["rows"] = [
-            row_payload(record, writable_column_keys=writable_column_keys)
+            row_payload(
+                record,
+                writable_column_keys=writable_column_keys,
+                system_columns=system_columns,
+            )
             for record in active_records
         ]
         data["styles"] = deepcopy(sheet.styles_json or [])

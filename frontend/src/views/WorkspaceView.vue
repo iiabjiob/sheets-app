@@ -627,7 +627,11 @@ async function performSaveActiveSheetDraft() {
       updatedActiveSheet,
       renameOperations,
     )
-    sheetStageRef.value?.markCommitted(payload)
+    sheetStageRef.value?.markCommitted({
+      columns: updatedActiveSheet.columns,
+      rows: updatedActiveSheet.rows,
+      styles: updatedActiveSheet.styles,
+    })
     pendingGridDraftWorkspaceId.value = workspacesStore.activeWorkspaceId
     pendingGridDraftSheetId.value = workspacesStore.activeSheetId
     pendingGridDraft.value = sheetStageRef.value?.getCurrentDraft() ?? null
@@ -682,13 +686,12 @@ function asNumber(value: unknown) {
 
 <template>
   <div class="workspace-shell" :style="workspaceShellStyle">
-    <AppRail />
+    <AppRail :current-user-name="currentUserName" @logout="handleLogout" />
 
     <aside ref="workspacePaneRef" class="workspace-pane">
       <WorkspaceTopbar
         :workspace-name="activeWorkspaceName"
         :workspace-description="activeWorkspaceDescription"
-        :current-user-name="currentUserName"
         :workspace-count="workspaceCount"
         :total-sheet-count="totalSheetCount"
         :has-active-workspace="Boolean(workspacesStore.activeWorkspaceId)"
@@ -707,7 +710,6 @@ function asNumber(value: unknown) {
         @move-sheet="handleSheetMove"
         @delete-sheet="handleSheetDelete"
         @delete-workspace="handleWorkspaceDelete"
-        @logout="handleLogout"
       />
 
       <WorkspaceTree

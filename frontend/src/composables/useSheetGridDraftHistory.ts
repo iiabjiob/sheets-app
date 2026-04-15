@@ -10,6 +10,13 @@ import type {
 
 type GridRow = Record<string, unknown>
 
+const PRESERVED_ROW_META_KEYS = new Set([
+  '__record_created_by',
+  '__record_created_at',
+  '__record_updated_by',
+  '__record_updated_at',
+])
+
 interface GridHistoryEntry {
   label: string
   snapshot: GridHistorySnapshot
@@ -91,6 +98,12 @@ export function useSheetGridDraftHistory(input: {
         id: String(row.id ?? input.createClientRowId()),
       }
 
+      for (const [rowKey, rowValue] of Object.entries(row)) {
+        if (PRESERVED_ROW_META_KEYS.has(rowKey)) {
+          nextRow[rowKey] = rowValue
+        }
+      }
+
       for (const columnKey of writableColumnKeys) {
         if (columnKey in row) {
           nextRow[columnKey] = row[columnKey]
@@ -127,6 +140,11 @@ export function useSheetGridDraftHistory(input: {
       })),
       rows: payload.rows.map((row) => ({
         id: String(row.id ?? ''),
+        meta: Object.fromEntries(
+          Object.entries(row)
+            .filter(([key]) => PRESERVED_ROW_META_KEYS.has(key))
+            .map(([key, value]) => [key, stableSerializeValue(value)]),
+        ),
         values: writableColumns.map((column) => stableSerializeValue(row[column.key])),
       })),
       styles: payload.styles.map((rule) => ({

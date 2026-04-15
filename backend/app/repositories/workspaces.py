@@ -4,7 +4,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import SheetModel, WorkbookModel, WorkspaceMemberModel, WorkspaceModel
+from app.models import SheetModel, SheetRecordModel, WorkbookModel, WorkspaceMemberModel, WorkspaceModel
 
 
 class WorkspaceRepository:
@@ -83,10 +83,17 @@ class WorkspaceRepository:
         options = [selectinload(WorkspaceModel.workbooks).selectinload(WorkbookModel.sheets)]
 
         if include_records or include_grid:
-            options.append(
-                selectinload(WorkspaceModel.workbooks)
-                .selectinload(WorkbookModel.sheets)
-                .selectinload(SheetModel.records)
+            options.extend(
+                [
+                    selectinload(WorkspaceModel.workbooks)
+                    .selectinload(WorkbookModel.sheets)
+                    .selectinload(SheetModel.records)
+                    .selectinload(SheetRecordModel.creator),
+                    selectinload(WorkspaceModel.workbooks)
+                    .selectinload(WorkbookModel.sheets)
+                    .selectinload(SheetModel.records)
+                    .selectinload(SheetRecordModel.updater),
+                ]
             )
 
         if include_members:

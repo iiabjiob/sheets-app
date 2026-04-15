@@ -71,6 +71,6 @@
   --z-layer-pane: 10;
   --z-layer-rail: 20;
   --z-overlay-base: 1000;
-  --z-overlay-menu: 1200;
   --z-overlay-dialog: 1300;
+  --z-overlay-menu: 1400;
 }

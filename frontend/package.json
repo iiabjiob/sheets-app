@@ -17,9 +17,9 @@
   },
   "dependencies": {
     "@affino/combobox-vue": "^0.1.0",
-    "@affino/datagrid-core": "^0.3.14",
+    "@affino/datagrid-core": "^0.3.15",
     "@affino/datagrid-formula-engine": "^0.1.1",
-    "@affino/datagrid-vue-app": "^0.1.35",
+    "@affino/datagrid-vue-app": "^0.1.36",
     "@affino/dialog-vue": "^1.1.0",
     "@affino/menu-vue": "^2.1.1",
     "@affino/overlay-host": "^1.1.0",

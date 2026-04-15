@@ -52,7 +52,6 @@ const FORMULA_DATA_TYPES: Array<{ value: GridColumnDataType; label: string }> = 
   { value: 'number', label: 'Number' },
   { value: 'currency', label: 'Currency' },
   { value: 'date', label: 'Date' },
-  { value: 'status', label: 'Status' },
 ]
 
 const props = defineProps<{
