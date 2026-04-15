@@ -309,6 +309,9 @@ interface FormulaIndicatorTooltipState {
 }
 
 const FORMULA_INDICATOR_TOOLTIP_MAX_PREVIEW_LENGTH = 160
+const SELECTION_SUMMARY_NUMBER_FORMATTER = new Intl.NumberFormat(undefined, {
+  maximumFractionDigits: 2,
+})
 
 const GRID_LINES = {
   body: 'all',
@@ -2492,7 +2495,7 @@ const {
   scheduleInlineFormulaGridRefocus,
   applyInlineFormulaSelectionReference,
   syncInlineFormulaState,
-  getSelectionAggregatesLabel: () => dataGridRef.value?.getSelectionAggregatesLabel?.() ?? '',
+  getSelectionAggregatesLabel: () => resolveGridSelectionAggregatesLabel(),
   getGridRuntime,
   readGridColumns,
   readGridRows,
@@ -2743,7 +2746,190 @@ onBeforeUnmount(() => {
 })
 
 function syncGridSelectionAggregatesLabel() {
-  gridSelectionAggregatesLabel.value = dataGridRef.value?.getSelectionAggregatesLabel?.() ?? ''
+  gridSelectionAggregatesLabel.value = resolveGridSelectionAggregatesLabel()
+}
+
+function resolveVisibleGridColumnKeysForSelectionSummary() {
+  const snapshot = gridApi.value?.columns.getSnapshot() as GridColumnsSnapshotLike | null | undefined
+  const visibleColumnKeys = snapshot?.visibleColumns
+    ?.map((column) => column.key)
+    .filter((columnKey): columnKey is string => typeof columnKey === 'string' && columnKey.length > 0)
+
+  if (visibleColumnKeys && visibleColumnKeys.length) {
+    return visibleColumnKeys
+  }
+
+  return currentGridStyleColumns.value.map((column) => column.key)
+}
+
+function selectionTouchesPlaceholderRows(snapshot: GridSelectionSnapshotLike | null) {
+  if (!snapshot) {
+    return false
+  }
+
+  const realRowCount = currentGridStyleRows.value.length
+  const visualRowCount = currentGridVisualRowCount.value
+  if (visualRowCount <= realRowCount) {
+    return false
+  }
+
+  const ranges = [
+    ...(snapshot.selectionRange
+      ? [{
+          startRow: snapshot.selectionRange.startRow,
+          endRow: snapshot.selectionRange.endRow,
+        }]
+      : []),
+    ...(snapshot.ranges ?? []).map((range) => ({
+      startRow: range.startRow,
+      endRow: range.endRow,
+    })),
+  ]
+
+  return ranges.some((range) => {
+    const endRow = Math.max(range.startRow, range.endRow)
+    return endRow >= realRowCount && endRow < visualRowCount
+  })
+}
+
+function toSelectionSummaryNumber(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+
+  if (value instanceof Date) {
+    return value.getTime()
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function isSelectionSummaryValueEmpty(value: unknown) {
+  if (value === null || value === undefined) {
+    return true
+  }
+
+  if (typeof value === 'string') {
+    return value.trim().length === 0
+  }
+
+  return false
+}
+
+function formatSelectionSummaryNumber(value: number) {
+  return SELECTION_SUMMARY_NUMBER_FORMATTER.format(value)
+}
+
+function buildPlaceholderSelectionRow(rowIndex: number): GridSourceRowNode {
+  return {
+    rowId: `${FORMULA_PLACEHOLDER_ROW_ID_PREFIX}${rowIndex}`,
+    data: {
+      id: `${FORMULA_PLACEHOLDER_ROW_ID_PREFIX}${rowIndex}`,
+    },
+  }
+}
+
+function toGridSelectionRowNode(row: GridSourceRowNode) {
+  return row as Parameters<typeof readGridSelectionCell>[0]
+}
+
+function buildSelectionAggregatesLabelFromTargets() {
+  const targets = selectedStyleTargets.value
+  if (targets.length <= 1) {
+    return ''
+  }
+
+  const columnKeys = resolveVisibleGridColumnKeysForSelectionSummary()
+  if (!columnKeys.length) {
+    return ''
+  }
+
+  const seenCells = new Set<string>()
+  let selectedCells = 0
+  let numericCount = 0
+  let numericSum = 0
+  let numericMin = Number.POSITIVE_INFINITY
+  let numericMax = Number.NEGATIVE_INFINITY
+  let hasNonEmptyValue = false
+
+  for (const target of targets) {
+    const rowIndex = Math.max(0, target.rowIndex)
+    const columnIndex = Math.max(0, target.columnIndex)
+    const cellKey = `${rowIndex}:${columnIndex}`
+    if (seenCells.has(cellKey)) {
+      continue
+    }
+
+    seenCells.add(cellKey)
+    selectedCells += 1
+
+    const columnKey = columnKeys[columnIndex]
+    if (!columnKey) {
+      continue
+    }
+
+    const rowNode = toGridSelectionRowNode(
+      rowIndex < currentGridStyleRows.value.length
+        ? {
+            rowId: String(currentGridStyleRows.value[rowIndex]?.id ?? ''),
+            data: currentGridStyleRows.value[rowIndex] ?? {},
+          }
+        : buildPlaceholderSelectionRow(rowIndex),
+    )
+
+    const value = readGridSelectionCell(rowNode, columnKey)
+    if (!isSelectionSummaryValueEmpty(value)) {
+      hasNonEmptyValue = true
+    }
+
+    const numericValue = toSelectionSummaryNumber(value)
+    if (numericValue === null) {
+      continue
+    }
+
+    numericCount += 1
+    numericSum += numericValue
+    if (numericValue < numericMin) {
+      numericMin = numericValue
+    }
+    if (numericValue > numericMax) {
+      numericMax = numericValue
+    }
+  }
+
+  if (selectedCells <= 1 || !hasNonEmptyValue) {
+    return ''
+  }
+
+  const parts = [`Count: ${selectedCells}`]
+  if (numericCount > 0) {
+    parts.push(`Sum: ${formatSelectionSummaryNumber(numericSum)}`)
+    parts.push(`Avg: ${formatSelectionSummaryNumber(numericSum / numericCount)}`)
+    parts.push(`Min: ${formatSelectionSummaryNumber(numericMin)}`)
+    parts.push(`Max: ${formatSelectionSummaryNumber(numericMax)}`)
+  }
+
+  return parts.join(' | ')
+}
+
+function resolveGridSelectionAggregatesLabel() {
+  const targets = selectedStyleTargets.value
+  if (targets.length <= 1) {
+    return ''
+  }
+
+  const fallbackLabel = buildSelectionAggregatesLabelFromTargets()
+  if (!fallbackLabel) {
+    return ''
+  }
+
+  const snapshot = gridSelectionSnapshot.value
+  if (selectionTouchesPlaceholderRows(snapshot)) {
+    return fallbackLabel
+  }
+
+  return dataGridRef.value?.getSelectionAggregatesLabel?.() ?? fallbackLabel
 }
 
 function resetGridSessionState() {
