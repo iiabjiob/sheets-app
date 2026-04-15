@@ -31,6 +31,7 @@ def default_column_title(index: int) -> str:
 
 
 INITIAL_SHEET_PLACEHOLDER_ROW_BUDGET = 50
+PLACEHOLDER_ROW_ID_PREFIX = "__datagrid_placeholder__:"
 
 
 def build_default_column_blueprints() -> list[dict[str, object]]:
@@ -233,8 +234,13 @@ def normalize_grid_rows(
     normalized_rows: list[dict[str, object]] = []
 
     for row in rows:
+        raw_row_id = str(row.get("id") or "").strip()
         row_payload: dict[str, object] = {
-            "id": str(row.get("id") or f"rec_{uuid4().hex[:8]}")
+            "id": (
+                f"rec_{uuid4().hex[:8]}"
+                if not raw_row_id or raw_row_id.startswith(PLACEHOLDER_ROW_ID_PREFIX)
+                else raw_row_id
+            )
         }
 
         for column_key in column_keys:

@@ -3747,7 +3747,7 @@ function upsertGridCellValue(
     ...existingRow,
     id: String(
       didMaterializeMissingRow
-        ? targetCell.rowId
+        ? existingRow.id ?? createClientRowId()
         : existingRow.id ?? targetCell.rowId ?? createClientRowId(),
     ),
     [targetCell.columnKey]: rawValue,
