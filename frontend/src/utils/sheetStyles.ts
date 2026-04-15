@@ -329,6 +329,7 @@ function resolveTextDecoration(style: SheetCellStyle) {
 
 export function buildSheetCellStyleCssProperties(style: SheetCellStyle): CSSProperties {
   const css: CSSProperties = {}
+  const cssVariables = css as CSSProperties & Record<string, string>
 
   if (style.font_family) {
     css.fontFamily = style.font_family
@@ -350,9 +351,11 @@ export function buildSheetCellStyleCssProperties(style: SheetCellStyle): CSSProp
 
   if (style.text_color) {
     css.color = style.text_color
+    cssVariables['--sheet-cell-text-color'] = style.text_color
   }
   if (style.background_color) {
     css.backgroundColor = style.background_color
+    cssVariables['--sheet-cell-background-color'] = style.background_color
   }
   if (style.horizontal_align) {
     css.textAlign = style.horizontal_align

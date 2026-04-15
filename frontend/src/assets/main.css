@@ -637,6 +637,7 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   display: flex;
+  width: 100%;
 }
 
 .formula-pane {
@@ -1256,6 +1257,9 @@ button:disabled {
 .sheet-grid-stage__grid {
   min-height: 0;
   height: 100%;
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
   display: flex;
   position: relative;
   overflow: hidden;
@@ -1264,6 +1268,8 @@ button:disabled {
 
 .sheet-grid-stage__grid > :not(.sheet-grid-stage__selection-summary):not(.sheet-grid-stage__index-pane-canvas):not(.sheet-grid-stage__formula-reference-canvas) {
   flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -1293,6 +1299,8 @@ button:disabled {
 .sheet-grid-stage__grid .affino-datagrid-app-root,
 .sheet-grid-stage__grid .grid-stage,
 .sheet-grid-stage__grid .grid-stage::before {
+  width: 100%;
+  min-width: 0;
   min-height: 0;
   height: 100%;
   border-radius: 0;
@@ -1307,7 +1315,6 @@ button:disabled {
   );
   --sheet-grid-index-selection-fill: rgba(31, 143, 82, 0.06);
   --sheet-grid-index-selection-stroke: var(--color-accent);
-  --datagrid-selection-range-bg: transparent;
   --datagrid-selection-overlay-fill-bg: transparent;
   --datagrid-selection-overlay-move-bg: transparent;
 }
@@ -1368,9 +1375,13 @@ button:disabled {
   display: none;
 }
 
+.sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selected {
+  background: var(--sheet-cell-background-color, var(--datagrid-selection-range-bg)) !important;
+}
+
 .sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor,
 .sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor.grid-cell--selected {
-  background: transparent !important;
+  background: var(--sheet-cell-background-color, var(--datagrid-row-background-color)) !important;
 }
 
 .sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root,
@@ -1501,7 +1512,7 @@ button:disabled {
 }
 
 .sheet-cell__title {
-  color: var(--color-text-strong);
+  color: var(--sheet-cell-text-color, var(--color-text-strong));
   font-weight: 500;
 }
 
@@ -1518,7 +1529,7 @@ button:disabled {
 }
 
 .sheet-cell__value {
-  color: var(--color-text-body);
+  color: var(--sheet-cell-text-color, var(--color-text-body));
 }
 
 .sheet-cell__formula-shell {
@@ -1571,7 +1582,7 @@ button:disabled {
   opacity: 0.72;
   transform: translateY(-50%) translateX(0);
   pointer-events: auto;
-  cursor: help;
+  cursor: default;
 }
 
 .sheet-grid-stage__grid .grid-cell:hover .sheet-cell__formula-indicator:hover,
@@ -1599,6 +1610,7 @@ button:disabled {
   padding: 0 var(--space-2);
   border-radius: var(--radius-pill);
   border: 1px solid var(--color-border);
+  color: var(--sheet-cell-text-color, var(--sheet-status-badge-text-color, var(--color-text-body)));
   font-size: var(--font-size-sm);
   font-weight: 600;
   white-space: nowrap;
@@ -1607,37 +1619,37 @@ button:disabled {
 .sheet-status-badge--ready {
   background: var(--color-accent-soft);
   border-color: var(--color-accent-border);
-  color: var(--color-accent-strong);
+  --sheet-status-badge-text-color: var(--color-accent-strong);
 }
 
 .sheet-status-badge--progress {
   background: var(--color-progress-soft);
   border-color: var(--color-border);
-  color: var(--color-progress);
+  --sheet-status-badge-text-color: var(--color-progress);
 }
 
 .sheet-status-badge--planning {
   background: var(--color-warning-soft);
   border-color: var(--color-warning-border);
-  color: var(--color-warning);
+  --sheet-status-badge-text-color: var(--color-warning);
 }
 
 .sheet-status-badge--risk {
   background: var(--color-risk-soft);
   border-color: var(--color-risk-border);
-  color: var(--color-risk);
+  --sheet-status-badge-text-color: var(--color-risk);
 }
 
 .sheet-status-badge--neutral {
   background: var(--color-surface-subtle);
   border-color: var(--color-border);
-  color: var(--color-text-muted);
+  --sheet-status-badge-text-color: var(--color-text-muted);
 }
 
 .sheet-status-badge--error {
   background: var(--color-risk-soft);
   border-color: var(--color-risk-border);
-  color: var(--color-risk);
+  --sheet-status-badge-text-color: var(--color-risk);
 }
 
 .sheet-save-pill {
@@ -1720,7 +1732,7 @@ button:disabled {
   border-radius: var(--radius-pill);
   border: 1px solid var(--color-border);
   background: var(--color-surface-subtle);
-  color: var(--color-text-body);
+  color: var(--sheet-cell-text-color, var(--color-text-body));
   font-size: var(--font-size-sm);
 }
 
@@ -1730,7 +1742,7 @@ button:disabled {
 }
 
 .sheet-progress__value {
-  color: var(--color-text-strong);
+  color: var(--sheet-cell-text-color, var(--color-text-strong));
   font-weight: 600;
 }
 

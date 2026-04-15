@@ -69,12 +69,13 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
       }
     }
   } | null
-  readGridColumns: () => TColumn[]
+  readGridColumns: (options?: { includeLayoutWidths?: boolean }) => TColumn[]
   readGridRows: () => TRow[]
   readGridStyles: () => SheetStyleRule[]
   cloneGridColumns: (columns: TColumn[]) => TColumn[]
   cloneGridRows: (rows: TRow[]) => TRow[]
   cloneGridStyles: (styles: SheetStyleRule[]) => SheetStyleRule[]
+  persistGridColumnWidths: (columns: TColumn[]) => void
   serializeGridPayload: (payload: { columns: TColumn[]; rows: TRow[]; styles: SheetStyleRule[] }) => string
   scheduleDraftChange: (columns?: TColumn[], rows?: TRow[], styles?: SheetStyleRule[]) => void
   scheduleFormulaCellRefresh: () => void
@@ -262,6 +263,7 @@ export function useSheetGridRuntimeSync<TColumn, TRow extends GridRow>(input: {
     const previousColumns = input.cloneGridColumns(
       input.runtimeColumns.value.length ? input.runtimeColumns.value : input.inputColumns.value,
     )
+    input.persistGridColumnWidths(input.readGridColumns({ includeLayoutWidths: true }))
     const nextColumns = input.readGridColumns()
     const nextStyles = input.rebaseGridStylesAfterColumnChange(previousColumns, nextColumns)
     input.runtimeColumns.value = nextColumns

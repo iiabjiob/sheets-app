@@ -1,6 +1,7 @@
 export interface UiPreferences {
   layout?: {
     workspacePaneWidth?: number
+    sheetColumnWidths?: Record<string, Record<string, number>>
   }
 }
 
@@ -58,6 +59,53 @@ export function writeWorkspacePaneWidthPreference(width: number) {
     layout: {
       ...currentPreferences.layout,
       workspacePaneWidth: width,
+    },
+  }))
+}
+
+function normalizeSheetColumnWidthPreferences(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([columnKey, width]) => {
+        const normalizedWidth =
+          typeof width === 'number' && Number.isFinite(width) && width > 0
+            ? Math.round(width)
+            : null
+        return normalizedWidth ? [columnKey, normalizedWidth] : null
+      })
+      .filter((entry): entry is [string, number] => Boolean(entry)),
+  )
+}
+
+export function readSheetColumnWidthPreferences(sheetId: string) {
+  if (!sheetId) {
+    return {}
+  }
+
+  return normalizeSheetColumnWidthPreferences(readUiPreferences().layout?.sheetColumnWidths?.[sheetId])
+}
+
+export function writeSheetColumnWidthPreferences(
+  sheetId: string,
+  widths: Record<string, number>,
+) {
+  if (!sheetId) {
+    return
+  }
+
+  const normalizedWidths = normalizeSheetColumnWidthPreferences(widths)
+  updateUiPreferences((currentPreferences) => ({
+    ...currentPreferences,
+    layout: {
+      ...currentPreferences.layout,
+      sheetColumnWidths: {
+        ...currentPreferences.layout?.sheetColumnWidths,
+        [sheetId]: normalizedWidths,
+      },
     },
   }))
 }

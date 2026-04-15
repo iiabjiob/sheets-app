@@ -101,17 +101,24 @@ export function useSheetGridDraftHistory(input: {
     })
   }
 
+  function stripPresentationStateFromColumns(columns: SheetGridColumn[]) {
+    return columns.map((column) => ({
+      ...column,
+      width: null,
+    }))
+  }
+
   function serializeGridPayload(payload: SheetGridUpdateInput) {
-    const writableColumns = payload.columns.filter((column) => !isFormulaColumnDefinition(column))
+    const persistedColumns = stripPresentationStateFromColumns(payload.columns)
+    const writableColumns = persistedColumns.filter((column) => !isFormulaColumnDefinition(column))
 
     return JSON.stringify({
-      columns: payload.columns.map((column) => ({
+      columns: persistedColumns.map((column) => ({
         key: column.key,
         label: column.label,
         formula_alias: column.formula_alias,
         data_type: column.data_type,
         column_type: column.column_type,
-        width: column.width ?? null,
         editable: column.editable,
         computed: column.computed,
         expression: input.normalizeFormulaExpression(column.expression),
@@ -145,7 +152,7 @@ export function useSheetGridDraftHistory(input: {
 
     const normalizedRows = stripComputedValuesFromRows(columns, rows)
     const payload = {
-      columns: input.cloneGridColumns(columns),
+      columns: stripPresentationStateFromColumns(input.cloneGridColumns(columns)),
       rows: input.cloneGridRows(normalizedRows),
       styles: input.cloneGridStyles(styles),
     }

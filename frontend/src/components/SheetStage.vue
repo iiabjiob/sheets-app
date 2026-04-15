@@ -55,6 +55,10 @@ import {
   type FormulaCaretSelection,
 } from '@/formulas/formulaAutocomplete'
 import UiButton from '@/components/ui/UiButton.vue'
+import {
+  readSheetColumnWidthPreferences,
+  writeSheetColumnWidthPreferences,
+} from '@/preferences/uiPreferences'
 import { workspaceDataGridTheme } from '@/theme/dataGridTheme'
 import type {
   GridColumn as SheetGridColumn,
@@ -72,6 +76,7 @@ import {
   buildSheetCellStyleCssProperties,
   buildSheetStyleCellKey,
   clearSheetStylesInTargets,
+  cloneSheetCellStyle,
   cloneSheetStyleRules,
   createSheetStyleCellMap,
   normalizeSheetStyleRules,
@@ -347,6 +352,7 @@ const emit = defineEmits<{
 const inputRows = ref<GridRow[]>([])
 const inputColumns = ref<SheetGridColumn[]>([])
 const inputStyles = ref<SheetStyleRule[]>([])
+const localSheetColumnWidths = ref<Record<string, number>>({})
 const runtimeRows = ref<GridRow[]>([])
 const runtimeColumns = ref<SheetGridColumn[]>([])
 const runtimeStyles = ref<SheetStyleRule[]>([])
@@ -1092,6 +1098,20 @@ function setFormulaIndicatorTooltipElement(
   formulaIndicatorTooltipRef.value = resolveTooltipHostElement(element)
 }
 
+function setActiveFormulaTooltipElement(
+  element: Element | ComponentPublicInstance | null,
+  refs?: Record<string, unknown>,
+) {
+  if (activeFormulaTooltipKind.value === 'focus') {
+    setFormulaPreviewTooltipElement(element, refs)
+    return
+  }
+
+  if (activeFormulaTooltipKind.value === 'hover') {
+    setFormulaIndicatorTooltipElement(element, refs)
+  }
+}
+
 function resetCellHistoryMenu() {
   // Native package menus manage their own open/close state.
 }
@@ -1433,6 +1453,50 @@ const isFormulaIndicatorTooltipOpen = computed(
 )
 const formulaIndicatorTooltipProps = computed(() => formulaIndicatorTooltipController.getTooltipProps())
 const formulaIndicatorTooltipStyle = computed(() => formulaIndicatorTooltipFloating.tooltipStyle.value)
+const activeFormulaTooltipKind = computed<'focus' | 'hover' | null>(() => {
+  if (isFormulaPreviewTooltipOpen.value && formulaPreviewTooltipState.value) {
+    return 'focus'
+  }
+
+  if (isFormulaIndicatorTooltipOpen.value && formulaIndicatorTooltipState.value) {
+    return 'hover'
+  }
+
+  return null
+})
+const activeFormulaTooltipTeleportTarget = computed(() => {
+  if (activeFormulaTooltipKind.value === 'focus') {
+    return formulaPreviewTeleportTarget.value
+  }
+
+  if (activeFormulaTooltipKind.value === 'hover') {
+    return formulaIndicatorTeleportTarget.value
+  }
+
+  return null
+})
+const activeFormulaTooltipProps = computed(() => {
+  if (activeFormulaTooltipKind.value === 'focus') {
+    return formulaPreviewTooltipProps.value
+  }
+
+  if (activeFormulaTooltipKind.value === 'hover') {
+    return formulaIndicatorTooltipProps.value
+  }
+
+  return {}
+})
+const activeFormulaTooltipStyle = computed(() => {
+  if (activeFormulaTooltipKind.value === 'focus') {
+    return formulaPreviewTooltipStyle.value
+  }
+
+  if (activeFormulaTooltipKind.value === 'hover') {
+    return formulaIndicatorTooltipStyle.value
+  }
+
+  return {}
+})
 const {
   cellHistoryDialogOpen,
   cellHistoryDialogTarget,
@@ -1612,6 +1676,64 @@ const gridCellStyleMap = computed(() =>
 
 function cloneGridStyles(styles: SheetStyleRule[]) {
   return cloneSheetStyleRules(styles)
+}
+
+function normalizeSheetColumnWidth(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null
+}
+
+function areSheetColumnWidthsEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+) {
+  const leftEntries = Object.entries(left)
+  const rightEntries = Object.entries(right)
+  if (leftEntries.length !== rightEntries.length) {
+    return false
+  }
+
+  return leftEntries.every(([columnKey, width]) => right[columnKey] === width)
+}
+
+function loadLocalSheetColumnWidths(sheetId: string | null) {
+  const nextWidths = sheetId ? readSheetColumnWidthPreferences(sheetId) : {}
+  if (areSheetColumnWidthsEqual(localSheetColumnWidths.value, nextWidths)) {
+    return
+  }
+
+  localSheetColumnWidths.value = nextWidths
+}
+
+function applyLocalSheetColumnWidths(columns: SheetGridColumn[]) {
+  return columns.map((column) => ({
+    ...column,
+    width: localSheetColumnWidths.value[column.key] ?? column.width ?? null,
+  }))
+}
+
+function persistGridColumnWidths(columns: SheetGridColumn[]) {
+  if (!props.sheetId) {
+    if (Object.keys(localSheetColumnWidths.value).length > 0) {
+      localSheetColumnWidths.value = {}
+    }
+    return
+  }
+
+  const nextWidths = Object.fromEntries(
+    columns
+      .map((column) => {
+        const normalizedWidth = normalizeSheetColumnWidth(column.width)
+        return normalizedWidth ? [column.key, normalizedWidth] : null
+      })
+      .filter((entry): entry is [string, number] => Boolean(entry)),
+  )
+
+  if (areSheetColumnWidthsEqual(localSheetColumnWidths.value, nextWidths)) {
+    return
+  }
+
+  localSheetColumnWidths.value = nextWidths
+  writeSheetColumnWidthPreferences(props.sheetId, nextWidths)
 }
 
 function readGridStyles() {
@@ -1799,6 +1921,59 @@ const selectionTextColor = computed(() =>
 const selectionBackgroundColor = computed(() =>
   normalizeColorPickerValue(resolveUniformSelectionStyleValue('background_color')),
 )
+const selectedStyleTargetsSignature = computed(() =>
+  selectedStyleTargets.value.map((target) => buildSheetStyleCellKey(target.rowIndex, target.columnIndex)).join('|'),
+)
+const activeStyleSourceTarget = computed<SheetStyleCellTarget | null>(() => {
+  const activeCell = gridSelectionSnapshot.value?.activeCell
+  if (
+    activeCell &&
+    activeCell.rowIndex >= 0 &&
+    activeCell.colIndex >= 0 &&
+    activeCell.rowIndex < currentGridStyleRows.value.length &&
+    activeCell.colIndex < currentGridStyleColumns.value.length
+  ) {
+    return {
+      rowIndex: activeCell.rowIndex,
+      columnIndex: activeCell.colIndex,
+    }
+  }
+
+  return selectedStyleTargets.value[0] ?? null
+})
+const copyStyleSource = computed<SheetCellStyle | null>(() => {
+  const target = activeStyleSourceTarget.value
+  if (!target) {
+    return null
+  }
+
+  const style = gridCellStyleMap.value.get(buildSheetStyleCellKey(target.rowIndex, target.columnIndex)) ?? null
+  return style ? cloneSheetCellStyle(style) : null
+})
+const canCopyStyle = computed(() => Boolean(copyStyleSource.value))
+const paintStyleSource = ref<SheetCellStyle | null>(null)
+const paintStyleArmedSelectionSignature = ref('')
+const paintStyleMode = computed(() => Boolean(paintStyleSource.value))
+
+function clearPaintStyleMode() {
+  paintStyleSource.value = null
+  paintStyleArmedSelectionSignature.value = ''
+}
+
+function togglePaintStyleMode() {
+  if (paintStyleSource.value) {
+    clearPaintStyleMode()
+    return
+  }
+
+  const sourceStyle = copyStyleSource.value
+  if (!sourceStyle) {
+    return
+  }
+
+  paintStyleSource.value = cloneSheetCellStyle(sourceStyle)
+  paintStyleArmedSelectionSignature.value = selectedStyleTargetsSignature.value
+}
 
 function applyNextGridStyles(nextStyles: SheetStyleRule[], historyLabel: string) {
   const normalizedStyles = normalizeSheetStyleRules(
@@ -1823,6 +1998,8 @@ function applySelectionStylePatch(patch: Partial<SheetCellStyle>, historyLabel: 
     return
   }
 
+  clearPaintStyleMode()
+
   const nextStyles = applySheetStylePatchToRules(
     readGridStyles(),
     currentGridStyleRows.value,
@@ -1837,6 +2014,8 @@ function clearSelectionStyles() {
   if (!selectedStyleTargets.value.length) {
     return
   }
+
+  clearPaintStyleMode()
 
   const nextStyles = clearSheetStylesInTargets(
     readGridStyles(),
@@ -1878,6 +2057,28 @@ function setSelectionBackgroundColor(value: string | null) {
   )
 }
 
+function applyPaintStyleToSelection() {
+  const sourceStyle = paintStyleSource.value
+  if (!sourceStyle || !selectedStyleTargets.value.length) {
+    return
+  }
+
+  let nextStyles = clearSheetStylesInTargets(
+    readGridStyles(),
+    currentGridStyleRows.value,
+    currentGridStyleColumns.value,
+    selectedStyleTargets.value,
+  )
+  nextStyles = applySheetStylePatchToRules(
+    nextStyles,
+    currentGridStyleRows.value,
+    currentGridStyleColumns.value,
+    selectedStyleTargets.value,
+    sourceStyle,
+  )
+  applyNextGridStyles(nextStyles, 'Apply copied style')
+}
+
 const gridToolbarModules = computed<readonly DataGridAppToolbarModule[]>(() => [
   {
     key: 'sheet-style-panel',
@@ -1893,6 +2094,8 @@ const gridToolbarModules = computed<readonly DataGridAppToolbarModule[]>(() => [
       wrapMode: selectionWrapMode.value,
       textColor: selectionTextColor.value,
       backgroundColor: selectionBackgroundColor.value,
+      canCopyStyle: canCopyStyle.value,
+      paintStyleMode: paintStyleMode.value,
       onToggleBold: toggleSelectionBold,
       onToggleItalic: toggleSelectionItalic,
       onToggleUnderline: toggleSelectionUnderline,
@@ -1900,6 +2103,7 @@ const gridToolbarModules = computed<readonly DataGridAppToolbarModule[]>(() => [
       onSetWrapMode: setSelectionWrapMode,
       onSetTextColor: setSelectionTextColor,
       onSetBackgroundColor: setSelectionBackgroundColor,
+      onTogglePaintStyleMode: togglePaintStyleMode,
       onClearStyles: clearSelectionStyles,
     },
   },
@@ -2187,6 +2391,7 @@ const {
   cloneGridColumns,
   cloneGridRows,
   cloneGridStyles,
+  persistGridColumnWidths,
   serializeGridPayload,
   scheduleDraftChange,
   scheduleFormulaCellRefresh,
@@ -2219,16 +2424,18 @@ watch(
     clearPlaceholderRowsRestoreFrame()
     activeGridState.value = null
     shouldDelayPlaceholderRowsRestore.value = false
+    loadLocalSheetColumnWidths(props.sheetId)
+    const hydratedColumns = applyLocalSheetColumnWidths(cloneGridColumns(props.sheet?.columns ?? []))
     resetGridSessionState()
     clearGridHistory()
-    inputColumns.value = cloneGridColumns(props.sheet?.columns ?? [])
+    inputColumns.value = cloneGridColumns(hydratedColumns)
     inputRows.value = cloneGridRows(props.sheet?.rows ?? [])
     inputStyles.value = normalizeSheetStyleRules(
       props.sheet?.styles ?? [],
       props.sheet?.rows ?? [],
       props.sheet?.columns ?? [],
     )
-    runtimeColumns.value = cloneGridColumns(props.sheet?.columns ?? [])
+    runtimeColumns.value = cloneGridColumns(hydratedColumns)
     runtimeRows.value = cloneGridRows(props.sheet?.rows ?? [])
     runtimeStyles.value = cloneGridStyles(inputStyles.value)
     committedGridPayloadHash.value = serializeGridPayload({
@@ -2236,6 +2443,7 @@ watch(
       rows: inputRows.value,
       styles: inputStyles.value,
     })
+    clearPaintStyleMode()
     lastStableFormulaCellResults.value = new Map()
     isGridCellEditorActive.value = false
     emit('draftChange', null, context)
@@ -2243,6 +2451,25 @@ watch(
   },
   { immediate: true },
 )
+
+watch(selectedStyleTargetsSignature, (nextValue) => {
+  if (!paintStyleSource.value || !nextValue) {
+    return
+  }
+
+  if (nextValue === paintStyleArmedSelectionSignature.value) {
+    return
+  }
+
+  applyPaintStyleToSelection()
+  clearPaintStyleMode()
+})
+
+watch(isFormulaPreviewTooltipOpen, (isOpen) => {
+  if (isOpen) {
+    closeFormulaIndicatorTooltip('programmatic')
+  }
+})
 
 watch(
   () => formulaCellResults.value,
@@ -4026,10 +4253,13 @@ function readGridRows() {
   })
 }
 
-function readGridColumns() {
+function readGridColumns(options?: { includeLayoutWidths?: boolean }) {
+  const includeLayoutWidths = options?.includeLayoutWidths ?? true
+  const sourceColumns = runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value
+  const sourceWidthByKey = new Map(sourceColumns.map((column) => [column.key, column.width ?? null]))
   const snapshot = gridApi.value?.columns.getSnapshot() as GridColumnsSnapshotLike | undefined
   if (!snapshot) {
-    return cloneGridColumns(runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value)
+    return cloneGridColumns(sourceColumns)
   }
 
   const columnByKey = new Map(snapshot.columns.map((column) => [column.key, column]))
@@ -4049,9 +4279,9 @@ function readGridColumns() {
     )
     delete settings.formulaAlias
     delete settings.formula_alias
-    const options = normalizeStringArray(meta.options)
-    if (options.length) {
-      settings.options = [...options]
+    const columnOptions = normalizeStringArray(meta.options)
+    if (columnOptions.length) {
+      settings.options = [...columnOptions]
     }
 
     return {
@@ -4060,14 +4290,19 @@ function readGridColumns() {
       formula_alias: formulaAlias,
       data_type: normalizeGridColumnDataType(column.column.dataType, meta.dataType),
       column_type: normalizeGridColumnType(meta.columnType, column.column.dataType),
-      width: typeof column.state.width === 'number' ? column.state.width : null,
+      width: includeLayoutWidths
+        ? normalizeSheetColumnWidth(column.state.width) ??
+          localSheetColumnWidths.value[column.key] ??
+          sourceWidthByKey.get(column.key) ??
+          null
+        : sourceWidthByKey.get(column.key) ?? null,
       editable:
         typeof meta.editable === 'boolean'
           ? meta.editable
           : Boolean(column.column.capabilities?.editable),
       computed: Boolean(meta.computed) || Boolean(normalizeFormulaExpression(meta.expression)),
       expression: normalizeFormulaExpression(meta.expression),
-      options,
+      options: columnOptions,
       settings,
     }
   })
@@ -4209,6 +4444,11 @@ function buildFormulaIndicatorTriggerProps(formula: string) {
   return {
     ...triggerProps,
     onPointerenter: (event: PointerEvent) => {
+      if (isFormulaPreviewTooltipOpen.value) {
+        closeFormulaIndicatorTooltip('programmatic')
+        return
+      }
+
       const target = event.currentTarget
       if (target instanceof HTMLElement && formula) {
         formulaIndicatorTooltipState.value = buildFormulaIndicatorTooltipPreview(formula)
@@ -4882,44 +5122,42 @@ defineExpose<SheetStageHandle>({
           </div>
 
           <Teleport
-            v-if="formulaPreviewTeleportTarget"
-            :to="formulaPreviewTeleportTarget"
+            v-if="activeFormulaTooltipTeleportTarget"
+            :to="activeFormulaTooltipTeleportTarget"
           >
             <div
-              v-if="isFormulaPreviewTooltipOpen && formulaPreviewTooltipState"
-              :ref="setFormulaPreviewTooltipElement"
-              class="sheet-stage__formula-preview-tooltip"
-              v-bind="formulaPreviewTooltipProps"
-              :style="formulaPreviewTooltipStyle"
+              v-if="activeFormulaTooltipKind"
+              :ref="setActiveFormulaTooltipElement"
+              :class="[
+                'sheet-stage__formula-tooltip',
+                activeFormulaTooltipKind === 'focus'
+                  ? 'sheet-stage__formula-tooltip--focus'
+                  : 'sheet-stage__formula-tooltip--hover',
+              ]"
+              v-bind="activeFormulaTooltipProps"
+              :style="activeFormulaTooltipStyle"
             >
-              <div class="sheet-stage__formula-preview-label">
+              <div
+                v-if="activeFormulaTooltipKind === 'focus' && formulaPreviewTooltipState"
+                class="sheet-stage__formula-preview-label"
+              >
                 {{ formulaPreviewTooltipState.columnLabel }} · Row {{ formulaPreviewTooltipState.rowIndex + 1 }}
               </div>
-              <code class="sheet-stage__formula-preview-value">
-                {{ formulaPreviewTooltipState.formula }}
-              </code>
-            </div>
-          </Teleport>
-
-          <Teleport
-            v-if="formulaIndicatorTeleportTarget"
-            :to="formulaIndicatorTeleportTarget"
-          >
-            <div
-              v-if="isFormulaIndicatorTooltipOpen && formulaIndicatorTooltipState"
-              :ref="setFormulaIndicatorTooltipElement"
-              class="sheet-stage__formula-indicator-tooltip"
-              v-bind="formulaIndicatorTooltipProps"
-              :style="formulaIndicatorTooltipStyle"
-            >
-              <div class="sheet-stage__formula-indicator-tooltip-label">
+              <div
+                v-else-if="activeFormulaTooltipKind === 'hover' && formulaIndicatorTooltipState"
+                class="sheet-stage__formula-indicator-tooltip-label"
+              >
                 Formula
               </div>
-              <code class="sheet-stage__formula-indicator-tooltip-value">
-                {{ formulaIndicatorTooltipState.formula }}
+              <code class="sheet-stage__formula-preview-value">
+                {{
+                  activeFormulaTooltipKind === 'focus' && formulaPreviewTooltipState
+                    ? formulaPreviewTooltipState.formula
+                    : formulaIndicatorTooltipState?.formula
+                }}
               </code>
               <p
-                v-if="formulaIndicatorTooltipState.isTruncated"
+                v-if="activeFormulaTooltipKind === 'hover' && formulaIndicatorTooltipState?.isTruncated"
                 class="sheet-stage__formula-indicator-tooltip-note"
               >
                 Long formula preview. Open the formula editor to inspect the full expression.
@@ -4996,7 +5234,7 @@ defineExpose<SheetStageHandle>({
 </template>
 
 <style scoped>
-.sheet-stage__formula-preview-tooltip {
+.sheet-stage__formula-tooltip {
   max-width: min(460px, calc(100vw - 24px));
   display: grid;
   gap: 6px;
@@ -5007,6 +5245,12 @@ defineExpose<SheetStageHandle>({
   color: var(--color-text-strong);
   box-shadow: 0 14px 34px rgba(35, 41, 38, 0.16);
   backdrop-filter: blur(10px);
+}
+
+.sheet-stage__formula-tooltip--hover {
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 9px 11px;
+  background: rgba(248, 249, 248, 0.98);
 }
 
 .sheet-stage__formula-preview-label {
@@ -5026,34 +5270,10 @@ defineExpose<SheetStageHandle>({
   color: var(--color-text-strong);
 }
 
-.sheet-stage__formula-indicator-tooltip {
-  max-width: min(420px, calc(100vw - 24px));
-  display: grid;
-  gap: 6px;
-  padding: 9px 11px;
-  border: 1px solid rgba(79, 87, 84, 0.18);
-  border-radius: 12px;
-  background: rgba(248, 249, 248, 0.98);
-  color: var(--color-text-strong);
-  box-shadow: 0 14px 34px rgba(35, 41, 38, 0.16);
-  backdrop-filter: blur(10px);
-}
-
 .sheet-stage__formula-indicator-tooltip-label {
   font-size: 11px;
   line-height: 1.35;
   color: var(--color-text-soft);
-}
-
-.sheet-stage__formula-indicator-tooltip-value {
-  display: block;
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--color-text-strong);
 }
 
 .sheet-stage__formula-indicator-tooltip-note {
