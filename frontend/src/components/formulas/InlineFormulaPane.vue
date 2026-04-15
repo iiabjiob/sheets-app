@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ComponentPublicInstance } from 'vue'
 
+import SheetSidePane from '@/components/SheetSidePane.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import FormulaLibraryPanel from '@/components/formulas/FormulaLibraryPanel.vue'
 import type {
@@ -67,29 +68,15 @@ function assignInputRef(refValue: Element | ComponentPublicInstance | null) {
 </script>
 
 <template>
-  <aside
-    :ref="assignPanelRef"
-    class="formula-pane"
-    @keydown.capture="emit('paneKeydown', $event)"
+  <SheetSidePane
+    eyebrow="Formulas"
+    title="Cell formula"
+    :description="`${props.cell.columnLabel} · Row ${props.cell.rowIndex + 1}`"
+    close-aria-label="Close formula editor"
+    :set-panel-ref="props.setPanelRef"
+    @pane-keydown="emit('paneKeydown', $event)"
+    @close="emit('close')"
   >
-    <header class="formula-pane__header">
-      <div class="formula-pane__header-copy">
-        <span class="formula-pane__eyebrow">Formulas</span>
-        <h3>Cell formula</h3>
-        <p>{{ props.cell.columnLabel }} · Row {{ props.cell.rowIndex + 1 }}</p>
-      </div>
-
-      <UiButton
-        variant="ghost"
-        size="icon"
-        aria-label="Close formula editor"
-        @click="emit('close')"
-      >
-        x
-      </UiButton>
-    </header>
-
-    <div class="formula-pane__body">
       <!-- <div class="formula-pane__callout">
         Start with <code>=</code> and click cells in the grid to insert references.
       </div> -->
@@ -217,9 +204,8 @@ function assignInputRef(refValue: Element | ComponentPublicInstance | null) {
         :active-function-name="props.activeFunctionName"
         @use-example="emit('useExample', $event)"
       />
-    </div>
 
-    <footer class="formula-pane__footer">
+    <template #footer>
       <UiButton variant="ghost" size="sm" @click="emit('cancel')">
         Cancel
       </UiButton>
@@ -231,6 +217,6 @@ function assignInputRef(refValue: Element | ComponentPublicInstance | null) {
       >
         Apply
       </UiButton>
-    </footer>
-  </aside>
+    </template>
+  </SheetSidePane>
 </template>

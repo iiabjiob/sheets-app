@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -382,6 +383,8 @@ class WorkspaceService:
 
         sheet = await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=True)
         updated_at = timestamp()
+        previous_columns = self._build_activity_columns_snapshot(sheet.columns)
+        previous_row_ids = [record.id for record in sorted(sheet.records, key=lambda record: record.position) if not record.archived]
         previous_styles = deepcopy(sheet.styles_json or [])
         writable_column_keys = [
             str(column["key"]) for column in normalized_columns if not bool(column.get("computed"))
@@ -409,6 +412,16 @@ class WorkspaceService:
             next_rows=normalized_rows,
             created_at=updated_at,
         )
+        styles_changed = normalized_styles is not None and previous_styles != normalized_styles
+        activity_events = self._build_sheet_grid_activity_events(
+            previous_columns=previous_columns,
+            next_columns=normalized_columns,
+            previous_row_ids=previous_row_ids,
+            next_rows=normalized_rows,
+            cell_revisions=cell_revisions,
+            previous_styles=previous_styles,
+            next_styles=normalized_styles,
+        )
 
         self._sync_sheet_columns(
             session,
@@ -425,7 +438,6 @@ class WorkspaceService:
             existing_records_by_id=current_records_by_id,
             updated_at=updated_at,
         )
-        styles_changed = normalized_styles is not None and previous_styles != normalized_styles
         if normalized_styles is not None:
             sheet.styles_json = normalized_styles
         sheet.updated_at = updated_at
@@ -448,19 +460,16 @@ class WorkspaceService:
             if cell_revisions:
                 await session.flush()
                 session.add_all(cell_revisions)
-        self._append_activity(
-            session,
-            workspace_id=workspace_id,
-            workbook_id=sheet.workbook_id,
-            sheet_id=sheet.id,
-            user_id=user_id,
-            action_type="sheet_grid_updated",
-            payload={
-                "columnCount": len(sheet.columns),
-                "rowCount": len(sheet.records),
-                "styleRuleCount": len(sheet.styles_json or []),
-            },
-        )
+        for action_type, payload in activity_events:
+            self._append_activity(
+                session,
+                workspace_id=workspace_id,
+                workbook_id=sheet.workbook_id,
+                sheet_id=sheet.id,
+                user_id=user_id,
+                action_type=action_type,
+                payload=payload,
+            )
         workbook.updated_at = updated_at
         await session.commit()
 
@@ -513,6 +522,115 @@ class WorkspaceService:
             )
 
         return {"items": items}
+
+    async def get_sheet_activity(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        workspace_id: str,
+        sheet_id: str,
+        *,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        action_types: list[str] | None = None,
+        user_ids: list[str] | None = None,
+        limit: int = 200,
+    ) -> dict[str, object]:
+        await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=False)
+
+        scope_conditions = [
+            ActivityLogModel.workspace_id == workspace_id,
+            ActivityLogModel.sheet_id == sheet_id,
+        ]
+        filtered_conditions = list(scope_conditions)
+
+        normalized_action_types = sorted({value.strip() for value in (action_types or []) if value.strip()})
+        normalized_user_ids = sorted({value.strip() for value in (user_ids or []) if value.strip()})
+        if created_from is not None:
+            filtered_conditions.append(ActivityLogModel.created_at >= created_from)
+        if created_to is not None:
+            filtered_conditions.append(ActivityLogModel.created_at <= created_to)
+        if normalized_action_types:
+            filtered_conditions.append(ActivityLogModel.action_type.in_(normalized_action_types))
+        if normalized_user_ids:
+            filtered_conditions.append(ActivityLogModel.user_id.in_(normalized_user_ids))
+
+        activity_result = await session.execute(
+            select(ActivityLogModel, UserModel)
+            .outerjoin(UserModel, UserModel.id == ActivityLogModel.user_id)
+            .where(*filtered_conditions)
+            .order_by(ActivityLogModel.created_at.desc(), ActivityLogModel.id.desc())
+            .limit(limit)
+        )
+        action_result = await session.execute(
+            select(ActivityLogModel.action_type, func.count(ActivityLogModel.id))
+            .where(*scope_conditions)
+            .group_by(ActivityLogModel.action_type)
+            .order_by(func.count(ActivityLogModel.id).desc(), ActivityLogModel.action_type.asc())
+        )
+        collaborator_result = await session.execute(
+            select(
+                UserModel.id,
+                UserModel.email,
+                UserModel.full_name,
+                UserModel.avatar_url,
+                func.count(ActivityLogModel.id),
+            )
+            .join(UserModel, UserModel.id == ActivityLogModel.user_id)
+            .where(*scope_conditions, ActivityLogModel.user_id.is_not(None))
+            .group_by(UserModel.id, UserModel.email, UserModel.full_name, UserModel.avatar_url)
+            .order_by(
+                func.count(ActivityLogModel.id).desc(),
+                UserModel.full_name.asc(),
+                UserModel.email.asc(),
+            )
+        )
+
+        items = [
+            {
+                "id": activity.id,
+                "action_type": activity.action_type,
+                "workbook_id": activity.workbook_id,
+                "sheet_id": activity.sheet_id,
+                "record_id": activity.record_id,
+                "payload": deepcopy(activity.payload_json or {}),
+                "created_at": activity.created_at.isoformat(),
+                "actor": None
+                if actor is None
+                else {
+                    "id": actor.id,
+                    "email": actor.email,
+                    "full_name": actor.full_name,
+                    "avatar_url": actor.avatar_url,
+                },
+            }
+            for activity, actor in activity_result.all()
+        ]
+        actions = [
+            {
+                "action_type": action_type,
+                "count": count,
+            }
+            for action_type, count in action_result.all()
+        ]
+        collaborators = [
+            {
+                "actor": {
+                    "id": collaborator_id,
+                    "email": email,
+                    "full_name": full_name,
+                    "avatar_url": avatar_url,
+                },
+                "count": count,
+            }
+            for collaborator_id, email, full_name, avatar_url, count in collaborator_result.all()
+        ]
+
+        return {
+            "items": items,
+            "actions": actions,
+            "collaborators": collaborators,
+        }
 
     async def delete_sheet(self, session: AsyncSession, user_id: str, workspace_id: str, sheet_id: str) -> None:
         sheet = await self._require_sheet(session, user_id, workspace_id, sheet_id, include_grid=False)
@@ -814,6 +932,243 @@ class WorkspaceService:
                 created_at=created_at,
             )
         )
+
+    def _build_activity_columns_snapshot(
+        self,
+        columns: list[SheetColumnModel],
+    ) -> list[dict[str, object]]:
+        snapshot: list[dict[str, object]] = []
+
+        for column in sorted(columns, key=lambda item: item.position):
+            settings = deepcopy(column.settings_json or {})
+            raw_formula_alias = settings.get("formulaAlias", settings.get("formula_alias"))
+            try:
+                formula_alias = normalize_and_validate_formula_alias(raw_formula_alias)
+            except ValueError:
+                formula_alias = str(raw_formula_alias).strip() or None if raw_formula_alias is not None else None
+
+            raw_options = settings.get("options")
+            options = [str(option).strip() for option in raw_options if str(option).strip()] if isinstance(raw_options, list) else []
+            snapshot.append(
+                {
+                    "key": column.key,
+                    "label": column.title,
+                    "formula_alias": formula_alias,
+                    "column_type": column.type,
+                    "editable": column.editable,
+                    "computed": column.computed,
+                    "expression": column.expression,
+                    "options": options,
+                }
+            )
+
+        return snapshot
+
+    def _build_sheet_grid_activity_events(
+        self,
+        *,
+        previous_columns: list[dict[str, object]],
+        next_columns: list[dict[str, object]],
+        previous_row_ids: list[str],
+        next_rows: list[dict[str, object]],
+        cell_revisions: list[SheetCellRevisionModel],
+        previous_styles: list[dict[str, object]],
+        next_styles: list[dict[str, object]] | None,
+    ) -> list[tuple[str, dict[str, object]]]:
+        events: list[tuple[str, dict[str, object]]] = []
+        row_payload = self._build_sheet_row_change_activity_payload(
+            previous_row_ids=previous_row_ids,
+            next_rows=next_rows,
+        )
+        added_row_ids = set(row_payload.get("insertedRowIds", [])) if row_payload else set()
+        removed_row_ids = set(row_payload.get("deletedRowIds", [])) if row_payload else set()
+        column_payload = self._build_sheet_column_change_activity_payload(
+            previous_columns=previous_columns,
+            next_columns=next_columns,
+        )
+        cell_payload = self._build_sheet_cell_change_activity_payload(
+            cell_revisions=cell_revisions,
+            added_row_ids=added_row_ids,
+            removed_row_ids=removed_row_ids,
+            previous_columns=previous_columns,
+            next_columns=next_columns,
+            next_rows=next_rows,
+        )
+        style_payload = self._build_sheet_style_change_activity_payload(
+            previous_styles=previous_styles,
+            next_styles=next_styles,
+        )
+
+        if column_payload is not None:
+            events.append(("sheet_columns_changed", column_payload))
+        if row_payload is not None:
+            events.append(("sheet_rows_changed", row_payload))
+        if cell_payload is not None:
+            events.append(("sheet_cells_changed", cell_payload))
+        if style_payload is not None:
+            events.append(("sheet_styles_changed", style_payload))
+
+        return events
+
+    def _build_sheet_column_change_activity_payload(
+        self,
+        *,
+        previous_columns: list[dict[str, object]],
+        next_columns: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        previous_keys = [str(column["key"]) for column in previous_columns]
+        next_keys = [str(column["key"]) for column in next_columns]
+        previous_by_key = {str(column["key"]): column for column in previous_columns}
+        next_by_key = {str(column["key"]): column for column in next_columns}
+
+        added_keys = [column_key for column_key in next_keys if column_key not in previous_by_key]
+        removed_keys = [column_key for column_key in previous_keys if column_key not in next_by_key]
+        common_keys = [column_key for column_key in previous_keys if column_key in next_by_key]
+        renamed_columns = [
+            {
+                "key": column_key,
+                "previousLabel": previous_by_key[column_key].get("label"),
+                "nextLabel": next_by_key[column_key].get("label"),
+            }
+            for column_key in common_keys
+            if previous_by_key[column_key].get("label") != next_by_key[column_key].get("label")
+        ]
+        alias_changed_columns = [
+            {
+                "key": column_key,
+                "previousAlias": previous_by_key[column_key].get("formula_alias"),
+                "nextAlias": next_by_key[column_key].get("formula_alias"),
+            }
+            for column_key in common_keys
+            if previous_by_key[column_key].get("formula_alias") != next_by_key[column_key].get("formula_alias")
+        ]
+        reconfigured_columns = [
+            column_key
+            for column_key in common_keys
+            if any(
+                previous_by_key[column_key].get(field_name) != next_by_key[column_key].get(field_name)
+                for field_name in ("column_type", "editable", "computed", "expression", "options")
+            )
+        ]
+        reordered = common_keys != [column_key for column_key in next_keys if column_key in previous_by_key]
+
+        if not (added_keys or removed_keys or renamed_columns or alias_changed_columns or reconfigured_columns or reordered):
+            return None
+
+        return {
+            "addedCount": len(added_keys),
+            "removedCount": len(removed_keys),
+            "renamedCount": len(renamed_columns),
+            "aliasChangedCount": len(alias_changed_columns),
+            "reconfiguredCount": len(reconfigured_columns),
+            "reordered": reordered,
+            "addedColumns": added_keys[:5],
+            "removedColumns": removed_keys[:5],
+            "renamedColumns": renamed_columns[:5],
+            "aliasChangedColumns": alias_changed_columns[:5],
+            "reconfiguredColumns": reconfigured_columns[:5],
+        }
+
+    def _build_sheet_row_change_activity_payload(
+        self,
+        *,
+        previous_row_ids: list[str],
+        next_rows: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        next_row_ids = [str(row.get("id")) for row in next_rows]
+        previous_row_id_set = set(previous_row_ids)
+        next_row_id_set = set(next_row_ids)
+        inserted_row_ids = [row_id for row_id in next_row_ids if row_id not in previous_row_id_set]
+        deleted_row_ids = [row_id for row_id in previous_row_ids if row_id not in next_row_id_set]
+        inserted_row_numbers = [index + 1 for index, row_id in enumerate(next_row_ids) if row_id not in previous_row_id_set]
+        deleted_row_numbers = [index + 1 for index, row_id in enumerate(previous_row_ids) if row_id not in next_row_id_set]
+        previous_common_row_ids = [row_id for row_id in previous_row_ids if row_id in next_row_id_set]
+        next_common_row_ids = [row_id for row_id in next_row_ids if row_id in previous_row_id_set]
+        reordered = previous_common_row_ids != next_common_row_ids
+
+        if not (inserted_row_ids or deleted_row_ids or reordered):
+            return None
+
+        return {
+            "insertedCount": len(inserted_row_ids),
+            "deletedCount": len(deleted_row_ids),
+            "reordered": reordered,
+            "insertedRowNumbers": inserted_row_numbers[:5],
+            "deletedRowNumbers": deleted_row_numbers[:5],
+            "insertedRowIds": inserted_row_ids[:5],
+            "deletedRowIds": deleted_row_ids[:5],
+        }
+
+    def _build_sheet_cell_change_activity_payload(
+        self,
+        *,
+        cell_revisions: list[SheetCellRevisionModel],
+        added_row_ids: set[str],
+        removed_row_ids: set[str],
+        previous_columns: list[dict[str, object]],
+        next_columns: list[dict[str, object]],
+        next_rows: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        relevant_revisions = [
+            revision
+            for revision in cell_revisions
+            if revision.record_id not in added_row_ids and revision.record_id not in removed_row_ids
+        ]
+        if not relevant_revisions:
+            return None
+
+        affected_row_ids = sorted({revision.record_id for revision in relevant_revisions})
+        affected_column_keys = sorted({revision.column_key for revision in relevant_revisions})
+        row_number_by_id = {
+            str(row.get("id")): index + 1
+            for index, row in enumerate(next_rows)
+            if row.get("id") is not None
+        }
+        column_label_by_key: dict[str, str] = {}
+        for column in previous_columns:
+            column_key = str(column.get("key") or "").strip()
+            column_label = str(column.get("label") or column_key).strip()
+            if column_key:
+                column_label_by_key[column_key] = column_label or column_key
+        for column in next_columns:
+            column_key = str(column.get("key") or "").strip()
+            column_label = str(column.get("label") or column_key).strip()
+            if column_key:
+                column_label_by_key[column_key] = column_label or column_key
+
+        return {
+            "changedCellCount": len(relevant_revisions),
+            "affectedRowCount": len(affected_row_ids),
+            "affectedColumnCount": len(affected_column_keys),
+            "affectedRowIds": affected_row_ids[:5],
+            "affectedColumns": affected_column_keys[:5],
+            "affectedColumnLabels": [column_label_by_key.get(column_key, column_key) for column_key in affected_column_keys[:5]],
+            "sampleChanges": [
+                {
+                    "recordId": revision.record_id,
+                    "rowNumber": row_number_by_id.get(revision.record_id),
+                    "columnKey": revision.column_key,
+                    "columnLabel": column_label_by_key.get(revision.column_key, revision.column_key),
+                    "previousValue": deepcopy(revision.previous_value_json),
+                    "nextValue": deepcopy(revision.next_value_json),
+                }
+                for revision in relevant_revisions[:5]
+            ],
+        }
+
+    def _build_sheet_style_change_activity_payload(
+        self,
+        *,
+        previous_styles: list[dict[str, object]],
+        next_styles: list[dict[str, object]] | None,
+    ) -> dict[str, object] | None:
+        if next_styles is None or previous_styles == next_styles:
+            return None
+
+        return {
+            "previousRuleCount": len(previous_styles),
+            "nextRuleCount": len(next_styles),
+        }
 
     def _build_sheet_cell_revisions(
         self,

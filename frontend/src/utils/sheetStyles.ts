@@ -356,6 +356,10 @@ export function buildSheetCellStyleCssProperties(style: SheetCellStyle): CSSProp
   if (style.background_color) {
     css.backgroundColor = style.background_color
     cssVariables['--sheet-cell-background-color'] = style.background_color
+    css.boxShadow = [
+      'inset calc(-1 * var(--datagrid-column-divider-size, 1px)) 0 0 0 var(--datagrid-column-divider-color, rgba(44, 59, 51, 0.16))',
+      'inset 0 calc(-1 * var(--datagrid-row-divider-size, 1px)) 0 0 var(--datagrid-row-divider-color, rgba(44, 59, 51, 0.16))',
+    ].join(', ')
   }
   if (style.horizontal_align) {
     css.textAlign = style.horizontal_align

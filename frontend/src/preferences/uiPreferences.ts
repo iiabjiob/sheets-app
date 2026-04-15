@@ -1,6 +1,7 @@
 export interface UiPreferences {
   layout?: {
     workspacePaneWidth?: number
+    sheetSidePaneWidth?: number
     sheetColumnWidths?: Record<string, Record<string, number>>
   }
 }
@@ -59,6 +60,21 @@ export function writeWorkspacePaneWidthPreference(width: number) {
     layout: {
       ...currentPreferences.layout,
       workspacePaneWidth: width,
+    },
+  }))
+}
+
+export function readSheetSidePaneWidthPreference() {
+  const value = readUiPreferences().layout?.sheetSidePaneWidth
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+export function writeSheetSidePaneWidthPreference(width: number) {
+  updateUiPreferences((currentPreferences) => ({
+    ...currentPreferences,
+    layout: {
+      ...currentPreferences.layout,
+      sheetSidePaneWidth: width,
     },
   }))
 }

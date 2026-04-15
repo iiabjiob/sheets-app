@@ -153,3 +153,37 @@ class SheetCellHistoryEntry(BaseModel):
 
 class SheetCellHistoryResponse(BaseModel):
     items: list[SheetCellHistoryEntry] = Field(default_factory=list)
+
+
+class SheetActivityActor(BaseModel):
+    id: str | None = None
+    email: str | None = None
+    full_name: str
+    avatar_url: str | None = None
+
+
+class SheetActivityEntry(BaseModel):
+    id: str
+    action_type: str
+    workbook_id: str | None = None
+    sheet_id: str | None = None
+    record_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    actor: SheetActivityActor | None = None
+
+
+class SheetActivityActionOption(BaseModel):
+    action_type: str
+    count: int = Field(ge=0)
+
+
+class SheetActivityCollaboratorOption(BaseModel):
+    actor: SheetActivityActor
+    count: int = Field(ge=0)
+
+
+class SheetActivityResponse(BaseModel):
+    items: list[SheetActivityEntry] = Field(default_factory=list)
+    actions: list[SheetActivityActionOption] = Field(default_factory=list)
+    collaborators: list[SheetActivityCollaboratorOption] = Field(default_factory=list)

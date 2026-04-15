@@ -186,11 +186,12 @@ onBeforeUnmount(() => {
               @click="onTogglePaintStyleMode"
             >
               <svg class="sheet-style-toolbar-module__icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <path d="M3.25 5.75h8.5a1.75 1.75 0 0 1 1.75 1.75v1.5a1.75 1.75 0 0 1-1.75 1.75h-8.5z" />
-                <path d="M13.5 8.25h1.6a1.9 1.9 0 0 1 1.34.56l.81.81a1.9 1.9 0 0 1 0 2.69l-1.06 1.06" />
-                <path d="m9.5 11.25 2.25 2.25" />
-                <path d="m11.1 12.85-4.6 4.6" />
-                <path d="m5.3 18.65 1.25-1.25" />
+                <path d="M2.5 4.75h8.75a1.75 1.75 0 0 1 1.75 1.75v1a1.75 1.75 0 0 1-1.75 1.75H2.5z" />
+                <path d="M13 6.5h1.75a2.25 2.25 0 0 1 2.25 2.25v1" />
+                <path d="M17 9.75v2.25" />
+                <path d="M13.75 12h3.25" />
+                <path d="M13.75 12v4.5" />
+                <path d="M12 16.5h3.5" />
               </svg>
             </UiButton>
 

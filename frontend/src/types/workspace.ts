@@ -116,6 +116,48 @@ export interface SheetCellHistoryResponse {
   items: SheetCellHistoryEntry[]
 }
 
+export interface SheetActivityActor {
+  id: string | null
+  email: string | null
+  full_name: string
+  avatar_url: string | null
+}
+
+export interface SheetActivityEntry {
+  id: string
+  action_type: string
+  workbook_id: string | null
+  sheet_id: string | null
+  record_id: string | null
+  payload: Record<string, unknown>
+  created_at: string
+  actor: SheetActivityActor | null
+}
+
+export interface SheetActivityActionOption {
+  action_type: string
+  count: number
+}
+
+export interface SheetActivityCollaboratorOption {
+  actor: SheetActivityActor
+  count: number
+}
+
+export interface SheetActivityResponse {
+  items: SheetActivityEntry[]
+  actions: SheetActivityActionOption[]
+  collaborators: SheetActivityCollaboratorOption[]
+}
+
+export interface SheetActivityQuery {
+  created_from?: string
+  created_to?: string
+  action_types?: string[]
+  user_ids?: string[]
+  limit?: number
+}
+
 export interface WorkspaceCollectionResponse {
   items: WorkspaceSummary[]
 }

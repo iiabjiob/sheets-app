@@ -1,4 +1,6 @@
 import type {
+  SheetActivityQuery,
+  SheetActivityResponse,
   SheetCellHistoryResponse,
   SheetDetail,
   SheetGridUpdateInput,
@@ -36,6 +38,42 @@ export async function fetchSheetCellHistory(
 
   return apiRequest<SheetCellHistoryResponse>(
     `/workspaces/${workspaceId}/sheets/${sheetId}/cells/history?${searchParams.toString()}`,
+    {
+      auth: true,
+    },
+  )
+}
+
+export async function fetchSheetActivity(
+  workspaceId: string,
+  sheetId: string,
+  query: SheetActivityQuery = {},
+): Promise<SheetActivityResponse> {
+  const searchParams = new URLSearchParams()
+
+  if (query.created_from) {
+    searchParams.set('created_from', query.created_from)
+  }
+
+  if (query.created_to) {
+    searchParams.set('created_to', query.created_to)
+  }
+
+  query.action_types?.forEach((actionType) => {
+    searchParams.append('action_type', actionType)
+  })
+
+  query.user_ids?.forEach((userId) => {
+    searchParams.append('user_id', userId)
+  })
+
+  if (typeof query.limit === 'number') {
+    searchParams.set('limit', String(query.limit))
+  }
+
+  const search = searchParams.toString()
+  return apiRequest<SheetActivityResponse>(
+    `/workspaces/${workspaceId}/sheets/${sheetId}/activity${search ? `?${search}` : ''}`,
     {
       auth: true,
     },

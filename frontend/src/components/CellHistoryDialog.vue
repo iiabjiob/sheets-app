@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import { fetchSheetCellHistory } from '@/api/workspaces'
-import UiButton from '@/components/ui/UiButton.vue'
+import SheetSidePane from '@/components/SheetSidePane.vue'
 import type { SheetCellHistoryEntry } from '@/types/workspace'
 
 interface CellHistoryDialogTarget {
@@ -152,29 +152,17 @@ function formatCompactHistoryValue(value: unknown) {
 </script>
 
 <template>
-  <aside
+  <SheetSidePane
     v-if="open"
-    class="formula-pane cell-history-pane"
-    @keydown.esc.prevent.stop="closeDialog"
+    eyebrow="Cell History"
+    :title="targetTitle"
+    :description="currentValueLabel"
+    close-aria-label="Close cell history"
+    pane-class="cell-history-pane"
+    @pane-keydown="($event.key === 'Escape') && ($event.preventDefault(), $event.stopPropagation(), closeDialog())"
+    @close="closeDialog"
   >
-    <header class="formula-pane__header cell-history-pane__header">
-      <div class="formula-pane__header-copy cell-history-pane__header-copy">
-        <span class="formula-pane__eyebrow">Cell History</span>
-        <h3>{{ targetTitle }}</h3>
-        <p>{{ currentValueLabel }}</p>
-      </div>
-
-      <UiButton
-        variant="ghost"
-        size="icon"
-        aria-label="Close cell history"
-        @click="closeDialog"
-      >
-        x
-      </UiButton>
-    </header>
-
-    <div class="formula-pane__body cell-history-pane__body">
+    <div class="cell-history-pane__body">
       <div v-if="currentTarget?.computed" class="cell-history-pane__state cell-history-pane__state--info">
         Formula result history is not persisted yet.
       </div>
@@ -210,7 +198,7 @@ function formatCompactHistoryValue(value: unknown) {
         </li>
       </ol>
     </div>
-  </aside>
+  </SheetSidePane>
 </template>
 
 <style scoped>

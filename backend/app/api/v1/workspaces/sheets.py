@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response, status
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -9,6 +11,7 @@ from app.models import UserModel
 from app.schemas.common import MoveRequest
 from app.schemas.documents import SheetDocumentResponse
 from app.schemas.sheets import (
+    SheetActivityResponse,
     SheetCreateRequest,
     SheetCellHistoryResponse,
     SheetDetail,
@@ -114,6 +117,33 @@ async def get_sheet_cell_history(
             sheet_id,
             record_id=record_id,
             column_key=column_key,
+        )
+    )
+
+
+@router.get("/{workspace_id}/sheets/{sheet_id}/activity", response_model=SheetActivityResponse)
+async def get_sheet_activity(
+    workspace_id: str,
+    sheet_id: str,
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
+    action_type: list[str] | None = Query(default=None),
+    user_id: list[str] | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+) -> SheetActivityResponse:
+    return SheetActivityResponse.model_validate(
+        await workspace_service.get_sheet_activity(
+            db,
+            current_user.id,
+            workspace_id,
+            sheet_id,
+            created_from=created_from,
+            created_to=created_to,
+            action_types=action_type,
+            user_ids=user_id,
+            limit=limit,
         )
     )
 

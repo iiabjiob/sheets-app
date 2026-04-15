@@ -24,6 +24,7 @@ import {
 } from '@affino/datagrid-vue-app'
 
 import CellHistoryDialog from '@/components/CellHistoryDialog.vue'
+import SheetActivityPanel from '@/components/SheetActivityPanel.vue'
 import InlineFormulaPane from '@/components/formulas/InlineFormulaPane.vue'
 import RenameColumnDialog from '@/components/RenameColumnDialog.vue'
 import SheetStyleToolbarModule from '@/components/SheetStyleToolbarModule.vue'
@@ -44,6 +45,7 @@ import { useInlineFormulaDerivedState } from '@/composables/useInlineFormulaDeri
 import { useInlineFormulaSelectionInteractions } from '@/composables/useInlineFormulaSelectionInteractions'
 import { useSheetGridRuntimeSync } from '@/composables/useSheetGridRuntimeSync'
 import { useSheetCellHistory } from '@/composables/useSheetCellHistory'
+import { useSheetSidePaneWidth } from '@/composables/useSheetSidePaneWidth'
 import {
   type SheetDraftContext,
   useSheetGridDraftHistory,
@@ -358,7 +360,10 @@ const runtimeColumns = ref<SheetGridColumn[]>([])
 const runtimeStyles = ref<SheetStyleRule[]>([])
 const activeGridState = ref<DataGridUnifiedState<GridRow> | null>(null)
 const dataGridRef = ref<DataGridComponentHandle | null>(null)
+const sheetGridStageRef = ref<HTMLElement | null>(null)
 const gridRootRef = ref<HTMLElement | null>(null)
+const sheetSidePaneRef = ref<HTMLElement | null>(null)
+const sheetActivityPanelOpen = ref(false)
 const gridApi = ref<GridApiLike<GridRow> | null>(null)
 const gridRowModel = ref<GridEditableRowModel | null>(null)
 const committedGridPayloadHash = ref('')
@@ -401,6 +406,17 @@ const pendingGridSelectionRestoreSnapshot = ref<GridRuntimeSelectionSnapshotLike
 const gridFocusRestoreFrame = ref<number | null>(null)
 const indexPaneCanvasRef = ref<HTMLCanvasElement | null>(null)
 const formulaReferenceCanvasRef = ref<HTMLCanvasElement | null>(null)
+const {
+  sheetSidePaneWidth,
+  sheetGridStageStyle,
+  startSheetSidePaneResize,
+  handleSheetSidePaneResizerKeydown,
+  minSheetSidePaneWidth,
+  maxSheetSidePaneWidth,
+} = useSheetSidePaneWidth({
+  containerRef: sheetGridStageRef,
+  paneRef: sheetSidePaneRef,
+})
 
 type FormulaReferenceCanvasOverlay = {
   id: string
@@ -1116,6 +1132,31 @@ function resetCellHistoryMenu() {
   // Native package menus manage their own open/close state.
 }
 
+function closeSheetActivityPanel() {
+  sheetActivityPanelOpen.value = false
+}
+
+function openSheetActivityPanel() {
+  if (!props.sheetId) {
+    return
+  }
+
+  handleCellHistoryDialogClose()
+  dismissInlineFormulaComposer()
+  closeFormulaPreviewTooltip('programmatic')
+  closeFormulaIndicatorTooltip('programmatic')
+  sheetActivityPanelOpen.value = true
+}
+
+function toggleSheetActivityPanel() {
+  if (sheetActivityPanelOpen.value) {
+    closeSheetActivityPanel()
+    return
+  }
+
+  openSheetActivityPanel()
+}
+
 let teardownGridRuntimeImpl: (() => void) | null = null
 let queueGridFocusRestoreImpl: (() => void) | null = null
 
@@ -1630,6 +1671,9 @@ const isInlineFormulaReferenceMode = computed(
       isInlineFormulaGridInteracting.value),
 )
 const isInlineFormulaEditorOpen = computed(() => Boolean(inlineFormulaCell.value))
+const hasSheetSidePaneOpen = computed(
+  () => Boolean(inlineFormulaCell.value) || cellHistoryDialogOpen.value || sheetActivityPanelOpen.value,
+)
 const showsMultiRangeActiveCellOutline = computed(() => {
   const snapshot = gridSelectionSnapshot.value
   const ranges = snapshot?.ranges ?? []
@@ -1660,6 +1704,7 @@ const saveStatusTone = computed(() => {
 const currentGridStyleRows = computed(() =>
   runtimeRows.value.length ? runtimeRows.value : inputRows.value,
 )
+const currentGridVisualRowCount = computed(() => currentGridStyleRows.value.length + activePlaceholderRowCount.value)
 const currentGridStyleColumns = computed(() =>
   runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value,
 )
@@ -1797,7 +1842,7 @@ function addSelectedStyleTargets(
   startColumn: number,
   endColumn: number,
 ) {
-  const rowCount = currentGridStyleRows.value.length
+  const rowCount = currentGridVisualRowCount.value
   const columnCount = currentGridStyleColumns.value.length
   if (!rowCount || !columnCount) {
     return
@@ -1953,11 +1998,13 @@ const copyStyleSource = computed<SheetCellStyle | null>(() => {
 const canCopyStyle = computed(() => Boolean(copyStyleSource.value))
 const paintStyleSource = ref<SheetCellStyle | null>(null)
 const paintStyleArmedSelectionSignature = ref('')
+const paintStyleMouseSelectionActive = ref(false)
 const paintStyleMode = computed(() => Boolean(paintStyleSource.value))
 
 function clearPaintStyleMode() {
   paintStyleSource.value = null
   paintStyleArmedSelectionSignature.value = ''
+  paintStyleMouseSelectionActive.value = false
 }
 
 function togglePaintStyleMode() {
@@ -1975,21 +2022,52 @@ function togglePaintStyleMode() {
   paintStyleArmedSelectionSignature.value = selectedStyleTargetsSignature.value
 }
 
-function applyNextGridStyles(nextStyles: SheetStyleRule[], historyLabel: string) {
+function resolveRowsForStyleTargets(targets: readonly SheetStyleCellTarget[]) {
+  const currentRows = readGridRows()
+  const maxTargetRowIndex = targets.reduce((maxRowIndex, target) => Math.max(maxRowIndex, target.rowIndex), -1)
+  if (maxTargetRowIndex < currentRows.length) {
+    return {
+      rows: currentRows,
+      didMaterializeRows: false,
+    }
+  }
+
+  return {
+    rows: materializeGridRowsUpTo(currentRows, maxTargetRowIndex + 1),
+    didMaterializeRows: true,
+  }
+}
+
+function applyNextGridStyles(
+  nextStyles: SheetStyleRule[],
+  historyLabel: string,
+  options?: {
+    rows?: GridRow[]
+    didMaterializeRows?: boolean
+  },
+) {
+  const currentRows = readGridRows()
+  const currentColumns = readGridColumns()
+  const resolvedRows = options?.rows ? cloneGridRows(options.rows) : currentRows
   const normalizedStyles = normalizeSheetStyleRules(
     nextStyles,
-    currentGridStyleRows.value,
-    currentGridStyleColumns.value,
+    resolvedRows,
+    currentColumns,
   )
-  if (JSON.stringify(readGridStyles()) === JSON.stringify(normalizedStyles)) {
+  const didMaterializeRows = options?.didMaterializeRows === true
+  if (JSON.stringify(readGridStyles()) === JSON.stringify(normalizedStyles) && !didMaterializeRows) {
     return
   }
 
   const beforeSnapshot = captureGridHistorySnapshot()
-  inputStyles.value = cloneGridStyles(normalizedStyles)
-  runtimeStyles.value = cloneGridStyles(normalizedStyles)
-  scheduleDraftChange(undefined, undefined, normalizedStyles)
-  refreshGridStyleTargets(selectedStyleTargets.value)
+  if (didMaterializeRows) {
+    applyGridStructureChange(currentColumns, resolvedRows, normalizedStyles)
+  } else {
+    inputStyles.value = cloneGridStyles(normalizedStyles)
+    runtimeStyles.value = cloneGridStyles(normalizedStyles)
+    scheduleDraftChange(undefined, undefined, normalizedStyles)
+    refreshGridStyleTargets(selectedStyleTargets.value)
+  }
   recordGridHistoryTransaction(historyLabel, beforeSnapshot)
 }
 
@@ -2000,14 +2078,16 @@ function applySelectionStylePatch(patch: Partial<SheetCellStyle>, historyLabel: 
 
   clearPaintStyleMode()
 
+  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(selectedStyleTargets.value)
+
   const nextStyles = applySheetStylePatchToRules(
     readGridStyles(),
-    currentGridStyleRows.value,
+    targetRows,
     currentGridStyleColumns.value,
     selectedStyleTargets.value,
     patch,
   )
-  applyNextGridStyles(nextStyles, historyLabel)
+  applyNextGridStyles(nextStyles, historyLabel, { rows: targetRows, didMaterializeRows })
 }
 
 function clearSelectionStyles() {
@@ -2017,13 +2097,15 @@ function clearSelectionStyles() {
 
   clearPaintStyleMode()
 
+  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(selectedStyleTargets.value)
+
   const nextStyles = clearSheetStylesInTargets(
     readGridStyles(),
-    currentGridStyleRows.value,
+    targetRows,
     currentGridStyleColumns.value,
     selectedStyleTargets.value,
   )
-  applyNextGridStyles(nextStyles, 'Clear cell styles')
+  applyNextGridStyles(nextStyles, 'Clear cell styles', { rows: targetRows, didMaterializeRows })
 }
 
 function toggleSelectionBold() {
@@ -2063,20 +2145,47 @@ function applyPaintStyleToSelection() {
     return
   }
 
+  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(selectedStyleTargets.value)
+
   let nextStyles = clearSheetStylesInTargets(
     readGridStyles(),
-    currentGridStyleRows.value,
+    targetRows,
     currentGridStyleColumns.value,
     selectedStyleTargets.value,
   )
   nextStyles = applySheetStylePatchToRules(
     nextStyles,
-    currentGridStyleRows.value,
+    targetRows,
     currentGridStyleColumns.value,
     selectedStyleTargets.value,
     sourceStyle,
   )
-  applyNextGridStyles(nextStyles, 'Apply copied style')
+  applyNextGridStyles(nextStyles, 'Apply copied style', { rows: targetRows, didMaterializeRows })
+}
+
+function applyDeferredPaintStyleAfterMouseSelection() {
+  if (!paintStyleMouseSelectionActive.value) {
+    return
+  }
+
+  paintStyleMouseSelectionActive.value = false
+  if (!paintStyleSource.value) {
+    return
+  }
+
+  void nextTick(() => {
+    const nextValue = selectedStyleTargetsSignature.value
+    if (!paintStyleSource.value || !nextValue) {
+      return
+    }
+
+    if (nextValue === paintStyleArmedSelectionSignature.value) {
+      return
+    }
+
+    applyPaintStyleToSelection()
+    clearPaintStyleMode()
+  })
 }
 
 const gridToolbarModules = computed<readonly DataGridAppToolbarModule[]>(() => [
@@ -2443,6 +2552,7 @@ watch(
       rows: inputRows.value,
       styles: inputStyles.value,
     })
+    closeSheetActivityPanel()
     clearPaintStyleMode()
     lastStableFormulaCellResults.value = new Map()
     isGridCellEditorActive.value = false
@@ -2461,8 +2571,27 @@ watch(selectedStyleTargetsSignature, (nextValue) => {
     return
   }
 
+  if (paintStyleMouseSelectionActive.value && gridSelectionInteractionSource.value === 'mouse') {
+    return
+  }
+
   applyPaintStyleToSelection()
   clearPaintStyleMode()
+})
+
+watch(
+  () => Boolean(inlineFormulaCell.value),
+  (isOpen) => {
+    if (isOpen) {
+      closeSheetActivityPanel()
+    }
+  },
+)
+
+watch(cellHistoryDialogOpen, (isOpen) => {
+  if (isOpen) {
+    closeSheetActivityPanel()
+  }
 })
 
 watch(isFormulaPreviewTooltipOpen, (isOpen) => {
@@ -2722,6 +2851,9 @@ function handleGridMouseDownCapture(event: MouseEvent) {
   }
 
   gridSelectionInteractionSource.value = 'mouse'
+  if (paintStyleSource.value) {
+    paintStyleMouseSelectionActive.value = true
+  }
 
   if (!inlineFormulaCell.value) {
     return
@@ -2819,8 +2951,14 @@ function handleGridMouseMoveCapture(event: MouseEvent) {
 }
 
 function handleGridMouseUpCapture(event: MouseEvent) {
+  if (event.button !== 0) {
+    return
+  }
+
+  applyDeferredPaintStyleAfterMouseSelection()
+
   const pointerState = formulaReferencePointerState.value
-  if (!inlineFormulaCell.value || event.button !== 0) {
+  if (!inlineFormulaCell.value) {
     return
   }
 
@@ -5027,10 +5165,19 @@ defineExpose<SheetStageHandle>({
       </div>
 
       <div class="sheet-stage__header-actions">
-        
         <span class="sheet-save-pill" :class="`sheet-save-pill--${saveStatusTone}`">
           {{ saveStatusLabel ?? (savingChanges ? 'Saving...' : hasUnsavedChanges ? 'Unsaved changes' : 'All changes saved') }}
         </span>
+
+        <UiButton
+          variant="secondary"
+          size="sm"
+          :active="sheetActivityPanelOpen"
+          :disabled="!sheet"
+          @click="toggleSheetActivityPanel"
+        >
+          Activity
+        </UiButton>
 
         <UiButton
           variant="primary"
@@ -5045,14 +5192,16 @@ defineExpose<SheetStageHandle>({
     </header>
 
     <section
+      ref="sheetGridStageRef"
       v-if="sheet"
       class="sheet-grid-stage"
       :class="{
-        'sheet-grid-stage--with-formula-pane': inlineFormulaCell || cellHistoryDialogOpen,
+        'sheet-grid-stage--with-formula-pane': hasSheetSidePaneOpen,
         'sheet-grid-stage--formula-editor-open': isInlineFormulaEditorOpen,
         'sheet-grid-stage--formula-reference-mode': isInlineFormulaReferenceMode,
         'sheet-grid-stage--multi-range-active-cell': showsMultiRangeActiveCellOutline,
       }"
+      :style="sheetGridStageStyle"
     >
       <div class="sheet-grid-stage__workspace">
         <div
@@ -5167,46 +5316,74 @@ defineExpose<SheetStageHandle>({
         </div>
       </div>
 
-      <InlineFormulaPane
-        v-if="inlineFormulaCell"
-        :cell="inlineFormulaCell"
-        :value="inlineFormulaValue"
-        :highlight-segments="inlineFormulaAnalysis.highlightSegments"
-        :error-message="visibleInlineFormulaErrorMessage"
-        :autocomplete-visible="isInlineFormulaAutocompleteVisible"
-        :autocomplete-suggestions="inlineFormulaAutocompleteSuggestions"
-        :autocomplete-active-index="inlineFormulaAutocompleteActiveIndex"
-        :signature-hint="inlineFormulaSignatureHint"
-        :reference-targets="inlineFormulaReferenceTargets"
-        :active-function-name="highlightedInlineFormulaFunctionName"
-        :can-apply="inlineFormulaCanApply"
-        :set-panel-ref="setInlineFormulaPanelRef"
-        :set-highlight-ref="setInlineFormulaHighlightRef"
-        :set-input-ref="setInlineFormulaInputRef"
-        :format-reference-chip-label="formatFormulaReferenceChipLabel"
-        @close="closeInlineFormulaComposer"
-        @pane-keydown="handleInlineFormulaPaneKeydown"
-        @focus="handleInlineFormulaFocus"
-        @blur="handleInlineFormulaBlur"
-        @input="handleInlineFormulaInput"
-        @input-keydown="handleInlineFormulaKeydown"
-        @sync-caret="syncInlineFormulaCaretBoundary"
-        @scroll="handleInlineFormulaScroll"
-        @autocomplete-hover="inlineFormulaAutocompleteActiveIndex = $event"
-        @autocomplete-select="applyInlineFormulaAutocomplete"
-        @use-example="handleUseFormulaHelpExample"
-        @cancel="revertInlineFormulaDraft"
-        @apply="applyInlineFormulaDraft"
+      <div
+        v-if="hasSheetSidePaneOpen"
+        class="sheet-side-pane-resizer"
+        role="separator"
+        aria-label="Resize side panel"
+        aria-orientation="vertical"
+        :aria-valuemin="minSheetSidePaneWidth"
+        :aria-valuemax="maxSheetSidePaneWidth"
+        :aria-valuenow="sheetSidePaneWidth"
+        tabindex="0"
+        @pointerdown="startSheetSidePaneResize"
+        @keydown="handleSheetSidePaneResizerKeydown"
       />
 
-      <CellHistoryDialog
-        v-else-if="cellHistoryDialogOpen"
-        :open="cellHistoryDialogOpen"
-        :workspace-id="workspaceId"
-        :sheet-id="sheetId"
-        :target="cellHistoryDialogTarget"
-        @close="handleCellHistoryDialogClose"
-      />
+      <div
+        v-if="hasSheetSidePaneOpen"
+        ref="sheetSidePaneRef"
+        class="sheet-grid-stage__side-pane"
+      >
+        <InlineFormulaPane
+          v-if="inlineFormulaCell"
+          :cell="inlineFormulaCell"
+          :value="inlineFormulaValue"
+          :highlight-segments="inlineFormulaAnalysis.highlightSegments"
+          :error-message="visibleInlineFormulaErrorMessage"
+          :autocomplete-visible="isInlineFormulaAutocompleteVisible"
+          :autocomplete-suggestions="inlineFormulaAutocompleteSuggestions"
+          :autocomplete-active-index="inlineFormulaAutocompleteActiveIndex"
+          :signature-hint="inlineFormulaSignatureHint"
+          :reference-targets="inlineFormulaReferenceTargets"
+          :active-function-name="highlightedInlineFormulaFunctionName"
+          :can-apply="inlineFormulaCanApply"
+          :set-panel-ref="setInlineFormulaPanelRef"
+          :set-highlight-ref="setInlineFormulaHighlightRef"
+          :set-input-ref="setInlineFormulaInputRef"
+          :format-reference-chip-label="formatFormulaReferenceChipLabel"
+          @close="closeInlineFormulaComposer"
+          @pane-keydown="handleInlineFormulaPaneKeydown"
+          @focus="handleInlineFormulaFocus"
+          @blur="handleInlineFormulaBlur"
+          @input="handleInlineFormulaInput"
+          @input-keydown="handleInlineFormulaKeydown"
+          @sync-caret="syncInlineFormulaCaretBoundary"
+          @scroll="handleInlineFormulaScroll"
+          @autocomplete-hover="inlineFormulaAutocompleteActiveIndex = $event"
+          @autocomplete-select="applyInlineFormulaAutocomplete"
+          @use-example="handleUseFormulaHelpExample"
+          @cancel="revertInlineFormulaDraft"
+          @apply="applyInlineFormulaDraft"
+        />
+
+        <CellHistoryDialog
+          v-else-if="cellHistoryDialogOpen"
+          :open="cellHistoryDialogOpen"
+          :workspace-id="workspaceId"
+          :sheet-id="sheetId"
+          :target="cellHistoryDialogTarget"
+          @close="handleCellHistoryDialogClose"
+        />
+
+        <SheetActivityPanel
+          v-else-if="sheetActivityPanelOpen"
+          :open="sheetActivityPanelOpen"
+          :workspace-id="workspaceId"
+          :sheet-id="sheetId"
+          @close="closeSheetActivityPanel"
+        />
+      </div>
     </section>
 
     <div v-else class="sheet-grid-stage__empty">
