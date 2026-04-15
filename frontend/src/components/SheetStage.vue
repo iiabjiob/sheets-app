@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useFloatingTooltip, useTooltipController } from '@affino/tooltip-vue'
 import {
   createDataGridSpreadsheetFormulaReferenceDecorations,
   type DataGridFilterSnapshot,
@@ -276,6 +277,13 @@ interface SheetStageHandle {
   getCurrentDraft(): SheetGridUpdateInput | null
   markCommitted(payload: SheetGridUpdateInput): void
 }
+
+interface FormulaIndicatorTooltipState {
+  formula: string
+  isTruncated: boolean
+}
+
+const FORMULA_INDICATOR_TOOLTIP_MAX_PREVIEW_LENGTH = 160
 
 const GRID_LINES = {
   body: 'all',
@@ -1357,6 +1365,29 @@ const {
     resolveGridCellElement({ rowId, columnKey }),
   resolveColumnLabel: resolveColumnFormulaReferenceLabel,
 })
+const formulaIndicatorTooltipState = ref<FormulaIndicatorTooltipState | null>(null)
+const formulaIndicatorTooltipController = useTooltipController({
+  id: 'sheet-stage-formula-indicator-tooltip',
+  openDelay: 1000,
+  closeDelay: 0,
+})
+const formulaIndicatorTooltipFloating = useFloatingTooltip(formulaIndicatorTooltipController, {
+  placement: 'top',
+  align: 'end',
+  gutter: 10,
+  zIndex: 24,
+})
+const formulaIndicatorTeleportTarget = computed(
+  () => formulaIndicatorTooltipFloating.teleportTarget.value,
+)
+const formulaIndicatorTooltipRef = formulaIndicatorTooltipFloating.tooltipRef
+const isFormulaIndicatorTooltipOpen = computed(
+  () =>
+    formulaIndicatorTooltipController.state.value.open &&
+    Boolean(formulaIndicatorTooltipState.value),
+)
+const formulaIndicatorTooltipProps = computed(() => formulaIndicatorTooltipController.getTooltipProps())
+const formulaIndicatorTooltipStyle = computed(() => formulaIndicatorTooltipFloating.tooltipStyle.value)
 const {
   cellHistoryDialogOpen,
   cellHistoryDialogTarget,
@@ -1953,6 +1984,7 @@ onBeforeUnmount(() => {
   disposeGridCanvasColorProbe()
   disconnectFormulaHighlightViewportListeners()
   disposeFormulaPreviewTooltip()
+  formulaIndicatorTooltipController.dispose()
 })
 
 function syncGridSelectionAggregatesLabel() {
@@ -2052,6 +2084,8 @@ function isTextEditableElement(element: HTMLElement) {
 }
 
 function handleGridMouseDownCapture(event: MouseEvent) {
+  closeFormulaIndicatorTooltip('pointer')
+
   if (event.button !== 0) {
     return
   }
@@ -2335,6 +2369,8 @@ function handleGridHeaderClickCapture(event: MouseEvent, target: GridHeaderTarge
 }
 
 function handleGridClickCapture(event: MouseEvent) {
+  closeFormulaIndicatorTooltip('pointer')
+
   const target = event.target
   if (target instanceof HTMLElement && isGridHeaderInteractiveControlTarget(target)) {
     return
@@ -3711,6 +3747,80 @@ function resolveDeferredFormulaResult(
   )
 }
 
+function cellHasSpreadsheetFormula(row: GridRow | undefined, columnKey: string) {
+  return Boolean(row && isSpreadsheetFormulaValue(row[columnKey]))
+}
+
+function buildFormulaIndicatorTooltipPreview(formula: string) {
+  const normalizedFormula = formula.trim()
+  if (normalizedFormula.length <= FORMULA_INDICATOR_TOOLTIP_MAX_PREVIEW_LENGTH) {
+    return {
+      formula: normalizedFormula,
+      isTruncated: false,
+    }
+  }
+
+  return {
+    formula: `${normalizedFormula.slice(0, FORMULA_INDICATOR_TOOLTIP_MAX_PREVIEW_LENGTH - 1).trimEnd()}...`,
+    isTruncated: true,
+  }
+}
+
+function closeFormulaIndicatorTooltip(
+  reason: 'pointer' | 'keyboard' | 'programmatic' = 'programmatic',
+) {
+  formulaIndicatorTooltipState.value = null
+  formulaIndicatorTooltipController.close(reason)
+  formulaIndicatorTooltipFloating.triggerRef.value = null
+}
+
+function buildFormulaIndicatorTriggerProps(formula: string) {
+  const triggerProps = formulaIndicatorTooltipController.getTriggerProps()
+
+  return {
+    ...triggerProps,
+    onPointerenter: (event: PointerEvent) => {
+      const target = event.currentTarget
+      if (target instanceof HTMLElement && formula) {
+        formulaIndicatorTooltipState.value = buildFormulaIndicatorTooltipPreview(formula)
+        formulaIndicatorTooltipFloating.triggerRef.value = target
+      }
+
+      triggerProps.onPointerenter?.(event)
+    },
+    onPointerleave: (event: PointerEvent) => {
+      triggerProps.onPointerleave?.(event)
+    },
+  }
+}
+
+function renderFormulaHoverIndicator(formula: string) {
+  return h(
+    'span',
+    {
+      class: 'sheet-cell__formula-indicator',
+      'aria-hidden': 'true',
+      ...buildFormulaIndicatorTriggerProps(formula),
+    },
+    [h('span', { class: 'sheet-cell__formula-indicator-label' }, 'f(x)')],
+  )
+}
+
+function wrapFormulaCellContent(
+  content: ReturnType<typeof h>,
+  hasFormula: boolean,
+  formula: string | null,
+) {
+  if (!hasFormula) {
+    return content
+  }
+
+  return h('div', { class: 'sheet-cell__formula-shell' }, [
+    h('div', { class: 'sheet-cell__formula-content' }, [content]),
+    renderFormulaHoverIndicator(formula ?? ''),
+  ])
+}
+
 const readGridSelectionCell = defineDataGridSelectionCellReader<GridRow>()((rowNode, columnKey) => {
   const row = rowNode?.data
   const cellState = resolveRenderedCellState(
@@ -3788,28 +3898,32 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
         return h('span', { class: 'sheet-cell__value sheet-cell__value--placeholder' }, '')
       }
 
+      const typedRow = row as GridRow | undefined
+      const hasFormula = cellHasSpreadsheetFormula(typedRow, column.key)
+      const rawFormulaValue = hasFormula ? String(typedRow?.[column.key] ?? '') : null
+
       const cellState = resolveRenderedCellState(
         rowNode.rowId,
-        row as GridRow | undefined,
+        typedRow,
         column.key,
         displayValue,
         value,
       )
 
       if (column.key === 'task') {
-        return h(
+        return wrapFormulaCellContent(h(
           'span',
           {
             class: ['sheet-cell__title', cellState.error ? 'sheet-cell__formula-error' : null],
           },
           cellState.displayValue || 'Untitled task',
-        )
+        ), hasFormula, rawFormulaValue)
       }
 
       if (column.key === 'owner') {
         const owner = cellState.displayValue || 'Unassigned'
 
-        return h('div', { class: 'sheet-cell sheet-cell--owner' }, [
+        return wrapFormulaCellContent(h('div', { class: 'sheet-cell sheet-cell--owner' }, [
           h('span', { class: 'sheet-cell__avatar' }, initials(owner)),
           h(
             'span',
@@ -3818,14 +3932,14 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             },
             owner,
           ),
-        ])
+        ]), hasFormula, rawFormulaValue)
       }
 
       if (column.key === 'status') {
         const status = cellState.displayValue || 'No status'
         const tone = resolveStatusTone(status)
 
-        return h(
+        return wrapFormulaCellContent(h(
           'span',
           {
             class: [
@@ -3835,38 +3949,38 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
             ],
           },
           status,
-        )
+        ), hasFormula, rawFormulaValue)
       }
 
       if (column.key === 'timeline') {
-        return h(
+        return wrapFormulaCellContent(h(
           'span',
           {
             class: ['sheet-date-pill', cellState.error ? 'sheet-date-pill--error' : null],
           },
           cellState.displayValue || 'TBD',
-        )
+        ), hasFormula, rawFormulaValue)
       }
 
       if (column.key === 'progress') {
         const progress = clampProgress(asNumber(cellState.value))
 
-        return h(
+        return wrapFormulaCellContent(h(
           'span',
           {
             class: ['sheet-progress__value', cellState.error ? 'sheet-cell__formula-error' : null],
           },
           `${progress}%`,
-        )
+        ), hasFormula, rawFormulaValue)
       }
 
-      return h(
+      return wrapFormulaCellContent(h(
         'span',
         {
           class: ['sheet-cell__value', cellState.error ? 'sheet-cell__formula-error' : null],
         },
         cellState.displayValue,
-      )
+      ), hasFormula, rawFormulaValue)
     },
   }
 }
@@ -4355,6 +4469,32 @@ defineExpose<SheetStageHandle>({
               </code>
             </div>
           </Teleport>
+
+          <Teleport
+            v-if="formulaIndicatorTeleportTarget"
+            :to="formulaIndicatorTeleportTarget"
+          >
+            <div
+              v-if="isFormulaIndicatorTooltipOpen && formulaIndicatorTooltipState"
+              ref="formulaIndicatorTooltipRef"
+              class="sheet-stage__formula-indicator-tooltip"
+              v-bind="formulaIndicatorTooltipProps"
+              :style="formulaIndicatorTooltipStyle"
+            >
+              <div class="sheet-stage__formula-indicator-tooltip-label">
+                Formula
+              </div>
+              <code class="sheet-stage__formula-indicator-tooltip-value">
+                {{ formulaIndicatorTooltipState.formula }}
+              </code>
+              <p
+                v-if="formulaIndicatorTooltipState.isTruncated"
+                class="sheet-stage__formula-indicator-tooltip-note"
+              >
+                Long formula preview. Open the formula editor to inspect the full expression.
+              </p>
+            </div>
+          </Teleport>
         </div>
       </div>
 
@@ -4453,5 +4593,42 @@ defineExpose<SheetStageHandle>({
   font-size: 12px;
   line-height: 1.5;
   color: var(--color-text-strong);
+}
+
+.sheet-stage__formula-indicator-tooltip {
+  max-width: min(420px, calc(100vw - 24px));
+  display: grid;
+  gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid rgba(79, 87, 84, 0.18);
+  border-radius: 12px;
+  background: rgba(248, 249, 248, 0.98);
+  color: var(--color-text-strong);
+  box-shadow: 0 14px 34px rgba(35, 41, 38, 0.16);
+  backdrop-filter: blur(10px);
+}
+
+.sheet-stage__formula-indicator-tooltip-label {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--color-text-soft);
+}
+
+.sheet-stage__formula-indicator-tooltip-value {
+  display: block;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-strong);
+}
+
+.sheet-stage__formula-indicator-tooltip-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-soft);
 }
 </style>
