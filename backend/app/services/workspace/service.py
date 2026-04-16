@@ -1231,11 +1231,7 @@ class WorkspaceService:
         existing_columns_by_key: dict[str, SheetColumnModel],
         updated_at,
     ) -> None:
-        next_column_keys = {str(column["key"]) for column in normalized_columns}
-
-        for column in list(sheet.columns):
-            if column.key not in next_column_keys:
-                session.delete(column)
+        next_sheet_columns: list[SheetColumnModel] = []
 
         for position, normalized_column in enumerate(normalized_columns):
             column_key = str(normalized_column["key"])
@@ -1257,7 +1253,7 @@ class WorkspaceService:
             resolved_width = int(width) if isinstance(width, int) else None
 
             if existing_column is None:
-                sheet.columns.append(
+                next_sheet_columns.append(
                     SheetColumnModel(
                         id=f"col_{uuid4().hex[:8]}",
                         sheet_id=sheet.id,
@@ -1286,6 +1282,9 @@ class WorkspaceService:
             existing_column.expression = normalized_column.get("expression") or None
             existing_column.settings_json = settings
             existing_column.updated_at = updated_at
+            next_sheet_columns.append(existing_column)
+
+        sheet.columns = next_sheet_columns
 
     def _sync_sheet_records(
         self,

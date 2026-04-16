@@ -51,6 +51,49 @@ function findSheetLocation(workspaces: WorkspaceSummary[], sheetId: string | nul
   return null
 }
 
+function reconcileSheetGridResponse(
+  updatedSheet: SheetDetail,
+  requestedPayload: SheetGridUpdateInput,
+): SheetDetail {
+  const requestedColumnKeys = requestedPayload.columns.map((column) => column.key)
+  const requestedColumnKeySet = new Set(requestedColumnKeys)
+  const responseColumnByKey = new Map(updatedSheet.columns.map((column) => [column.key, column]))
+
+  if (
+    updatedSheet.columns.length <= requestedPayload.columns.length ||
+    requestedColumnKeys.some((columnKey) => !responseColumnByKey.has(columnKey))
+  ) {
+    return updatedSheet
+  }
+
+  const responseHasUnexpectedColumns = updatedSheet.columns.some(
+    (column) => !requestedColumnKeySet.has(column.key),
+  )
+  if (!responseHasUnexpectedColumns) {
+    return updatedSheet
+  }
+
+  const unexpectedColumnKeys = new Set(
+    updatedSheet.columns
+      .map((column) => column.key)
+      .filter((columnKey) => !requestedColumnKeySet.has(columnKey)),
+  )
+
+  return {
+    ...updatedSheet,
+    columns: requestedColumnKeys.map(
+      (columnKey) => responseColumnByKey.get(columnKey) ?? requestedPayload.columns.find((column) => column.key === columnKey)!,
+    ),
+    rows: updatedSheet.rows.map((row) => {
+      const nextRow = { ...row }
+      for (const columnKey of unexpectedColumnKeys) {
+        delete nextRow[columnKey]
+      }
+      return nextRow
+    }),
+  }
+}
+
 export const useWorkspacesStore = defineStore('workspaces', () => {
   const workspaces = ref<WorkspaceSummary[]>([])
   const activeWorkspaceId = ref<string | null>(null)
@@ -434,7 +477,10 @@ export const useWorkspacesStore = defineStore('workspaces', () => {
     errorMessage.value = null
 
     try {
-      const updatedSheet = await syncSheetGridRequest(workspaceId, sheetId, payload)
+      const updatedSheet = reconcileSheetGridResponse(
+        await syncSheetGridRequest(workspaceId, sheetId, payload),
+        payload,
+      )
       applySheetSummary(workspaceId, updatedSheet)
 
       if (activeWorkbookSheets.value.some((sheet) => sheet.id === sheetId)) {

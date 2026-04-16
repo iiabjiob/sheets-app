@@ -64,8 +64,10 @@ import UiButton from '@/components/ui/UiButton.vue'
 import { useAuthStore } from '@/stores/auth'
 import {
   readSheetColumnWidthPreferences,
+  readSheetFilterModelPreference,
   readSheetRowHeightPreferences,
   writeSheetColumnWidthPreferences,
+  writeSheetFilterModelPreference,
   writeSheetRowHeightPreferences,
 } from '@/preferences/uiPreferences'
 import { workspaceDataGridTheme } from '@/theme/dataGridTheme'
@@ -438,6 +440,7 @@ const inputRows = ref<GridRow[]>([])
 const inputColumns = ref<SheetGridColumn[]>([])
 const inputStyles = ref<SheetStyleRule[]>([])
 const localSheetColumnWidths = ref<Record<string, number>>({})
+const localSheetFilterModel = ref<DataGridFilterSnapshot | null>(null)
 const localSheetRowHeights = ref<Record<string, number>>({})
 const runtimeRows = ref<GridRow[]>([])
 const runtimeColumns = ref<SheetGridColumn[]>([])
@@ -1432,6 +1435,10 @@ function hasActiveAdvancedFilter(filterModel: DataGridFilterSnapshot | null | un
   return Object.keys(normalizedFilterModel.advancedFilters ?? {}).length > 0
 }
 
+function hasPersistableGridFilterModel(filterModel: DataGridFilterSnapshot | null | undefined) {
+  return hasActiveAdvancedFilter(filterModel)
+}
+
 const shouldDelayPlaceholderRowsRestore = ref(false)
 const materializedGridRowCount = computed(() => {
   if (runtimeRows.value.length) {
@@ -1478,6 +1485,7 @@ function schedulePlaceholderRowsRestore() {
 function handleGridStateUpdate(state: DataGridUnifiedState<GridRow> | null) {
   const hadActiveAdvancedFilter = hasActiveAdvancedGridFilter.value
   activeGridState.value = state
+  persistLocalSheetFilterModel(state?.rows.snapshot.filterModel ?? null)
   scheduleApplyPersistedGridRowHeights()
   const hasActiveFilterNow = hasActiveAdvancedFilter(state?.rows.snapshot.filterModel ?? null)
 
@@ -2270,6 +2278,58 @@ function refreshGridStyleTargets(targets: readonly SheetStyleCellTarget[]) {
   })
 }
 
+function resolveStyleTargetRowId(target: SheetStyleCellTarget) {
+  const runtimeRowId = getGridRuntime()?.getBodyRowAtIndex?.(target.rowIndex)?.rowId
+  if (runtimeRowId !== null && runtimeRowId !== undefined) {
+    return String(runtimeRowId)
+  }
+
+  const row = currentGridStyleRows.value[target.rowIndex]
+  const rowId = String(row?.id ?? '')
+  return rowId || null
+}
+
+function resolveSourceStyleTarget(target: SheetStyleCellTarget): SheetStyleCellTarget | null {
+  const rowId = resolveStyleTargetRowId(target)
+  if (rowId) {
+    const sourceRowIndex = currentGridStyleRowIndexById.value.get(rowId)
+    if (sourceRowIndex !== undefined) {
+      return {
+        rowIndex: sourceRowIndex,
+        columnIndex: target.columnIndex,
+      }
+    }
+  }
+
+  if (target.rowIndex >= 0 && target.rowIndex < currentGridStyleRows.value.length) {
+    return target
+  }
+
+  return null
+}
+
+function resolveSourceStyleTargets(targets: readonly SheetStyleCellTarget[]) {
+  const nextTargets: SheetStyleCellTarget[] = []
+  const seenTargets = new Set<string>()
+
+  for (const target of targets) {
+    const resolvedTarget = resolveSourceStyleTarget(target)
+    if (!resolvedTarget) {
+      continue
+    }
+
+    const targetKey = buildSheetStyleCellKey(resolvedTarget.rowIndex, resolvedTarget.columnIndex)
+    if (seenTargets.has(targetKey)) {
+      continue
+    }
+
+    seenTargets.add(targetKey)
+    nextTargets.push(resolvedTarget)
+  }
+
+  return nextTargets
+}
+
 function normalizeColorPickerValue(value: unknown) {
   if (typeof value !== 'string') {
     return ''
@@ -2298,6 +2358,151 @@ function normalizeGridFilterModel(filterModel: DataGridFilterSnapshot | null | u
     advancedFilters: { ...(normalizedFilterModel?.advancedFilters ?? {}) },
     advancedExpression: normalizedFilterModel?.advancedExpression ?? null,
   } satisfies GridFilterSnapshotWithStyleFilters
+}
+
+function sanitizePersistedAdvancedFilterExpression(
+  expression: GridFilterSnapshotWithStyleFilters['advancedExpression'],
+  allowedColumnKeys: ReadonlySet<string>,
+): GridFilterSnapshotWithStyleFilters['advancedExpression'] {
+  if (!expression) {
+    return null
+  }
+
+  if (expression.kind === 'condition') {
+    return allowedColumnKeys.has(expression.key) ? { ...expression } : null
+  }
+
+  if (expression.kind === 'not') {
+    const sanitizedChild = sanitizePersistedAdvancedFilterExpression(expression.child, allowedColumnKeys)
+    return sanitizedChild ? { ...expression, child: sanitizedChild } : null
+  }
+
+  const sanitizedChildren = expression.children
+    .map((child) => sanitizePersistedAdvancedFilterExpression(child, allowedColumnKeys))
+    .filter(
+      (
+        child,
+      ): child is NonNullable<GridFilterSnapshotWithStyleFilters['advancedExpression']> => Boolean(child),
+    )
+
+  return sanitizedChildren.length > 0
+    ? {
+        ...expression,
+        children: sanitizedChildren,
+      }
+    : null
+}
+
+function sanitizePersistedGridFilterModel(
+  filterModel: DataGridFilterSnapshot | Record<string, unknown> | null | undefined,
+  columnKeys: readonly string[],
+) {
+  if (!filterModel) {
+    return null
+  }
+
+  const allowedColumnKeys = new Set(columnKeys)
+  const normalizedFilterModel = normalizeGridFilterModel(filterModel as DataGridFilterSnapshot)
+  const columnFilters = Object.fromEntries(
+    Object.entries(normalizedFilterModel.columnFilters ?? {}).filter(([columnKey]) => {
+      if (allowedColumnKeys.has(columnKey)) {
+        return true
+      }
+
+      const syntheticStyleFilter = parseSyntheticColumnStyleFilterKey(columnKey)
+      return syntheticStyleFilter ? allowedColumnKeys.has(syntheticStyleFilter.columnKey) : false
+    }),
+  )
+  const columnStyleFilters = Object.fromEntries(
+    Object.entries(normalizedFilterModel.columnStyleFilters ?? {}).filter(([columnKey]) =>
+      allowedColumnKeys.has(columnKey),
+    ),
+  ) as GridFilterSnapshotWithStyleFilters['columnStyleFilters']
+  const advancedFilters = Object.fromEntries(
+    Object.entries(normalizedFilterModel.advancedFilters ?? {}).filter(([columnKey]) =>
+      allowedColumnKeys.has(columnKey),
+    ),
+  )
+  const advancedExpression = sanitizePersistedAdvancedFilterExpression(
+    normalizedFilterModel.advancedExpression,
+    allowedColumnKeys,
+  )
+
+  const sanitizedFilterModel = {
+    columnFilters,
+    columnStyleFilters,
+    advancedFilters,
+    advancedExpression,
+  } satisfies GridFilterSnapshotWithStyleFilters
+
+  return hasPersistableGridFilterModel(sanitizedFilterModel) ? (sanitizedFilterModel as DataGridFilterSnapshot) : null
+}
+
+function currentGridFilterColumnKeys() {
+  const activeColumns = runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value
+  return activeColumns.map((column) => column.key)
+}
+
+function loadLocalSheetFilterModel(sheetId: string, columnKeys: readonly string[]) {
+  localSheetFilterModel.value = sanitizePersistedGridFilterModel(
+    readSheetFilterModelPreference(sheetId),
+    columnKeys,
+  )
+}
+
+function persistLocalSheetFilterModel(filterModel: DataGridFilterSnapshot | null | undefined) {
+  if (!props.sheetId) {
+    return
+  }
+
+  const normalizedFilterModel = sanitizePersistedGridFilterModel(
+    filterModel,
+    currentGridFilterColumnKeys(),
+  )
+  localSheetFilterModel.value = normalizedFilterModel
+  writeSheetFilterModelPreference(
+    props.sheetId,
+    normalizedFilterModel as Record<string, unknown> | null,
+  )
+}
+
+function applyPersistedGridFilterModel(api = gridApi.value) {
+  if (!api) {
+    return
+  }
+
+  const persistedFilterModel = sanitizePersistedGridFilterModel(
+    localSheetFilterModel.value,
+    currentGridFilterColumnKeys(),
+  )
+  const currentState = api.state?.get() ?? activeGridState.value
+  if (!currentState) {
+    return
+  }
+
+  localSheetFilterModel.value = persistedFilterModel
+  const currentFilterModel = sanitizePersistedGridFilterModel(
+    currentState.rows.snapshot.filterModel ?? null,
+    currentGridFilterColumnKeys(),
+  )
+  if (JSON.stringify(currentFilterModel) === JSON.stringify(persistedFilterModel)) {
+    return
+  }
+
+  const nextState = {
+    ...currentState,
+    rows: {
+      ...currentState.rows,
+      snapshot: {
+        ...currentState.rows.snapshot,
+        filterModel: persistedFilterModel,
+      },
+    },
+  }
+
+  activeGridState.value = nextState
+  api.rows?.setFilterModel(persistedFilterModel)
+  api.state?.set(nextState)
 }
 
 function buildSyntheticColumnStyleFilterKey(
@@ -2702,8 +2907,11 @@ function resolveSelectedStyleTargets() {
 }
 
 const selectedStyleTargets = computed(() => resolveSelectedStyleTargets())
+const resolvedSelectedStyleTargets = computed(() =>
+  resolveSourceStyleTargets(selectedStyleTargets.value),
+)
 const selectedStyleCells = computed(() =>
-  selectedStyleTargets.value.map(
+  resolvedSelectedStyleTargets.value.map(
     (target) => gridCellStyleMap.value.get(buildSheetStyleCellKey(target.rowIndex, target.columnIndex)) ?? null,
   ),
 )
@@ -2751,7 +2959,7 @@ const selectionBackgroundColor = computed(() =>
   normalizeColorPickerValue(resolveUniformSelectionStyleValue('background_color')),
 )
 const selectedStyleTargetsSignature = computed(() =>
-  selectedStyleTargets.value.map((target) => buildSheetStyleCellKey(target.rowIndex, target.columnIndex)).join('|'),
+  resolvedSelectedStyleTargets.value.map((target) => buildSheetStyleCellKey(target.rowIndex, target.columnIndex)).join('|'),
 )
 const activeStyleSourceTarget = computed<SheetStyleCellTarget | null>(() => {
   const activeCell = gridSelectionSnapshot.value?.activeCell
@@ -2759,16 +2967,16 @@ const activeStyleSourceTarget = computed<SheetStyleCellTarget | null>(() => {
     activeCell &&
     activeCell.rowIndex >= 0 &&
     activeCell.colIndex >= 0 &&
-    activeCell.rowIndex < currentGridStyleRows.value.length &&
+    activeCell.rowIndex < currentGridVisualRowCount.value &&
     activeCell.colIndex < currentGridStyleColumns.value.length
   ) {
-    return {
+    return resolveSourceStyleTarget({
       rowIndex: activeCell.rowIndex,
       columnIndex: activeCell.colIndex,
-    }
+    })
   }
 
-  return selectedStyleTargets.value[0] ?? null
+  return resolvedSelectedStyleTargets.value[0] ?? null
 })
 const copyStyleSource = computed<SheetCellStyle | null>(() => {
   const target = activeStyleSourceTarget.value
@@ -2850,44 +3058,44 @@ function applyNextGridStyles(
     inputStyles.value = cloneGridStyles(normalizedStyles)
     runtimeStyles.value = cloneGridStyles(normalizedStyles)
     scheduleDraftChange(undefined, undefined, normalizedStyles)
-    refreshGridStyleTargets(selectedStyleTargets.value)
+    refreshGridStyleTargets(resolvedSelectedStyleTargets.value)
   }
   recordGridHistoryTransaction(historyLabel, beforeSnapshot)
 }
 
 function applySelectionStylePatch(patch: Partial<SheetCellStyle>, historyLabel: string) {
-  if (!selectedStyleTargets.value.length) {
+  if (!resolvedSelectedStyleTargets.value.length) {
     return
   }
 
   clearPaintStyleMode()
 
-  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(selectedStyleTargets.value)
+  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(resolvedSelectedStyleTargets.value)
 
   const nextStyles = applySheetStylePatchToRules(
     readGridStyles(),
     targetRows,
     currentGridStyleColumns.value,
-    selectedStyleTargets.value,
+    resolvedSelectedStyleTargets.value,
     patch,
   )
   applyNextGridStyles(nextStyles, historyLabel, { rows: targetRows, didMaterializeRows })
 }
 
 function clearSelectionStyles() {
-  if (!selectedStyleTargets.value.length) {
+  if (!resolvedSelectedStyleTargets.value.length) {
     return
   }
 
   clearPaintStyleMode()
 
-  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(selectedStyleTargets.value)
+  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(resolvedSelectedStyleTargets.value)
 
   const nextStyles = clearSheetStylesInTargets(
     readGridStyles(),
     targetRows,
     currentGridStyleColumns.value,
-    selectedStyleTargets.value,
+    resolvedSelectedStyleTargets.value,
   )
   applyNextGridStyles(nextStyles, 'Clear cell styles', { rows: targetRows, didMaterializeRows })
 }
@@ -2925,23 +3133,23 @@ function setSelectionBackgroundColor(value: string | null) {
 
 function applyPaintStyleToSelection() {
   const sourceStyle = paintStyleSource.value
-  if (!sourceStyle || !selectedStyleTargets.value.length) {
+  if (!sourceStyle || !resolvedSelectedStyleTargets.value.length) {
     return
   }
 
-  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(selectedStyleTargets.value)
+  const { rows: targetRows, didMaterializeRows } = resolveRowsForStyleTargets(resolvedSelectedStyleTargets.value)
 
   let nextStyles = clearSheetStylesInTargets(
     readGridStyles(),
     targetRows,
     currentGridStyleColumns.value,
-    selectedStyleTargets.value,
+    resolvedSelectedStyleTargets.value,
   )
   nextStyles = applySheetStylePatchToRules(
     nextStyles,
     targetRows,
     currentGridStyleColumns.value,
-    selectedStyleTargets.value,
+    resolvedSelectedStyleTargets.value,
     sourceStyle,
   )
   applyNextGridStyles(nextStyles, 'Apply copied style', { rows: targetRows, didMaterializeRows })
@@ -3356,6 +3564,7 @@ watch(
     loadLocalSheetColumnWidths(props.sheetId)
     loadLocalSheetRowHeights(props.sheetId)
     const hydratedColumns = applyLocalSheetColumnWidths(cloneGridColumns(props.sheet?.columns ?? []))
+    loadLocalSheetFilterModel(props.sheetId ?? '', hydratedColumns.map((column) => column.key))
     resetGridSessionState()
     clearGridHistory()
     inputColumns.value = cloneGridColumns(hydratedColumns)
@@ -3393,6 +3602,7 @@ watch(localSheetRowHeights, () => {
 
 watch(gridApi, (api) => {
   if (api) {
+    applyPersistedGridFilterModel(api)
     scheduleApplyPersistedGridRowHeights()
   }
 })
@@ -5674,19 +5884,22 @@ function readGridRows() {
 function readGridColumns(options?: { includeLayoutWidths?: boolean }) {
   const includeLayoutWidths = options?.includeLayoutWidths ?? true
   const sourceColumns = runtimeColumns.value.length ? runtimeColumns.value : inputColumns.value
+  const sourceColumnKeys = new Set(sourceColumns.map((column) => column.key))
   const sourceWidthByKey = new Map(sourceColumns.map((column) => [column.key, column.width ?? null]))
   const snapshot = gridApi.value?.columns.getSnapshot() as GridColumnsSnapshotLike | undefined
   if (!snapshot) {
     return cloneGridColumns(sourceColumns)
   }
 
-  const columnByKey = new Map(snapshot.columns.map((column) => [column.key, column]))
-  const orderedColumns = snapshot.order
+  const snapshotColumns = snapshot.columns.filter((column) => sourceColumnKeys.has(column.key))
+  const snapshotOrder = snapshot.order.filter((columnKey) => sourceColumnKeys.has(columnKey))
+  const columnByKey = new Map(snapshotColumns.map((column) => [column.key, column]))
+  const orderedColumns = snapshotOrder
     .map((columnKey) => columnByKey.get(columnKey))
     .filter((column): column is NonNullable<typeof column> => Boolean(column))
 
-  const remainingColumns = snapshot.columns.filter(
-    (column) => !snapshot.order.includes(column.key),
+  const remainingColumns = snapshotColumns.filter(
+    (column) => !snapshotOrder.includes(column.key),
   )
 
   return [...orderedColumns, ...remainingColumns].map((column) => {

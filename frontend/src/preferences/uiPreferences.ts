@@ -4,6 +4,7 @@ export interface UiPreferences {
     sheetSidePaneWidth?: number
     sheetColumnWidths?: Record<string, Record<string, number>>
     sheetRowHeights?: Record<string, Record<string, number>>
+    sheetFilterModels?: Record<string, Record<string, unknown>>
   }
 }
 
@@ -116,6 +117,40 @@ function normalizeSheetRowHeightPreferences(value: unknown) {
   )
 }
 
+function clonePersistableUiPreferenceValue(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => clonePersistableUiPreferenceValue(entry))
+  }
+
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        entryKey,
+        clonePersistableUiPreferenceValue(entryValue),
+      ]),
+    )
+  }
+
+  return null
+}
+
+function normalizeSheetFilterModelPreference(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null
+  }
+
+  return clonePersistableUiPreferenceValue(value) as Record<string, unknown>
+}
+
 export function readSheetColumnWidthPreferences(sheetId: string) {
   if (!sheetId) {
     return {}
@@ -172,4 +207,42 @@ export function writeSheetRowHeightPreferences(
       },
     },
   }))
+}
+
+export function readSheetFilterModelPreference(sheetId: string) {
+  if (!sheetId) {
+    return null
+  }
+
+  return normalizeSheetFilterModelPreference(readUiPreferences().layout?.sheetFilterModels?.[sheetId])
+}
+
+export function writeSheetFilterModelPreference(
+  sheetId: string,
+  filterModel: Record<string, unknown> | null,
+) {
+  if (!sheetId) {
+    return
+  }
+
+  const normalizedFilterModel = normalizeSheetFilterModelPreference(filterModel)
+  updateUiPreferences((currentPreferences) => {
+    const nextSheetFilterModels = {
+      ...(currentPreferences.layout?.sheetFilterModels ?? {}),
+    }
+
+    if (normalizedFilterModel) {
+      nextSheetFilterModels[sheetId] = normalizedFilterModel
+    } else {
+      delete nextSheetFilterModels[sheetId]
+    }
+
+    return {
+      ...currentPreferences,
+      layout: {
+        ...currentPreferences.layout,
+        sheetFilterModels: nextSheetFilterModels,
+      },
+    }
+  })
 }

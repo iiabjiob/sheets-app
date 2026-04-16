@@ -233,14 +233,14 @@ def normalize_grid_rows(
     system_column_keys: list[str] | None = None,
 ) -> list[dict[str, object]]:
     normalized_rows: list[dict[str, object]] = []
-    normalized_system_column_keys = [key for key in (system_column_keys or []) if key]
 
     for row in rows:
         raw_row_id = str(row.get("id") or "").strip()
+        is_placeholder_row = not raw_row_id or raw_row_id.startswith(PLACEHOLDER_ROW_ID_PREFIX)
         row_payload: dict[str, object] = {
             "id": (
                 f"rec_{uuid4().hex[:8]}"
-                if not raw_row_id or raw_row_id.startswith(PLACEHOLDER_ROW_ID_PREFIX)
+                if is_placeholder_row
                 else raw_row_id
             )
         }
@@ -249,11 +249,9 @@ def normalize_grid_rows(
             if column_key in row:
                 row_payload[column_key] = deepcopy(row[column_key])
 
-        has_system_values = any(
-            _has_meaningful_row_value(row.get(column_key))
-            for column_key in normalized_system_column_keys
-        )
-        if not row_has_meaningful_values(row_payload, column_keys) and not has_system_values:
+        has_meaningful_user_values = row_has_meaningful_values(row_payload, column_keys)
+
+        if not has_meaningful_user_values and is_placeholder_row:
             continue
 
         normalized_rows.append(row_payload)

@@ -225,6 +225,8 @@ export function useSheetGridDraftHistory(input: {
     input.inputColumns.value = input.cloneGridColumns(payload.columns)
     input.inputRows.value = input.cloneGridRows(payload.rows)
     input.inputStyles.value = input.cloneGridStyles(payload.styles)
+    input.runtimeColumns.value = input.cloneGridColumns(payload.columns)
+    input.runtimeRows.value = input.cloneGridRows(payload.rows)
     input.runtimeStyles.value = input.cloneGridStyles(payload.styles)
     input.committedGridPayloadHash.value = serializeGridPayload(payload)
     flushDraftChange()
