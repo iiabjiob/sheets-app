@@ -1345,6 +1345,13 @@ button:disabled {
   );
   --sheet-grid-index-selection-fill: rgba(31, 143, 82, 0.06);
   --sheet-grid-index-selection-stroke: var(--color-accent);
+  --datagrid-group-row-background-color: color-mix(
+    in srgb,
+    var(--color-accent-soft) 78%,
+    var(--color-surface) 22%
+  );
+  --datagrid-group-row-text-color: var(--color-progress);
+  --datagrid-row-band-group-bg: var(--datagrid-group-row-background-color);
   --datagrid-selection-overlay-fill-bg: transparent;
   --datagrid-selection-overlay-move-bg: transparent;
 }
@@ -1412,6 +1419,36 @@ button:disabled {
 .sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor,
 .sheet-grid-stage__grid .affino-datagrid-app-root .grid-cell--selection-anchor.grid-cell--selected {
   background: var(--sheet-cell-background-color, var(--datagrid-row-background-color)) !important;
+}
+
+.sheet-grid-stage__grid .grid-stage--canvas-chrome .grid-row.row--group::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: var(--datagrid-row-band-group-bg);
+}
+
+.sheet-grid-stage__grid .grid-row.row--group .grid-cell,
+.sheet-grid-stage__grid .grid-row.row--group .grid-cell--index,
+.sheet-grid-stage__grid .grid-row.row--group .grid-cell--index-number,
+.sheet-grid-stage__grid .grid-row.row--group > .grid-column-spacer {
+  background-image: linear-gradient(var(--datagrid-row-band-group-bg), var(--datagrid-row-band-group-bg));
+  background-size: calc(100% - var(--datagrid-column-divider-size)) calc(100% - var(--datagrid-row-divider-size));
+  background-position: top left;
+  background-repeat: no-repeat;
+  color: var(--datagrid-group-row-text-color);
+}
+
+.sheet-grid-stage__grid .grid-row.row--group:not(.grid-row--group-explicit-trigger):hover .grid-cell,
+.sheet-grid-stage__grid .grid-row.row--group:not(.grid-row--group-explicit-trigger):hover .grid-cell--index,
+.sheet-grid-stage__grid .grid-row.row--group:not(.grid-row--group-explicit-trigger):hover .grid-cell--index-number,
+.sheet-grid-stage__grid .grid-row.row--group:not(.grid-row--group-explicit-trigger):hover > .grid-column-spacer {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--datagrid-row-band-group-bg) 84%, var(--color-accent-border) 16%),
+    color-mix(in srgb, var(--datagrid-row-band-group-bg) 84%, var(--color-accent-border) 16%)
+  );
 }
 
 .sheet-grid-stage--formula-editor-open .sheet-grid-stage__grid .affino-datagrid-app-root,

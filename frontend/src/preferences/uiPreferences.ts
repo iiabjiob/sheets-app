@@ -3,6 +3,7 @@ export interface UiPreferences {
     workspacePaneWidth?: number
     sheetSidePaneWidth?: number
     sheetColumnWidths?: Record<string, Record<string, number>>
+    sheetRowHeights?: Record<string, Record<string, number>>
   }
 }
 
@@ -97,6 +98,24 @@ function normalizeSheetColumnWidthPreferences(value: unknown) {
   )
 }
 
+function normalizeSheetRowHeightPreferences(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([rowId, height]) => {
+        const normalizedHeight =
+          typeof height === 'number' && Number.isFinite(height) && height > 0
+            ? Math.round(height)
+            : null
+        return normalizedHeight ? [rowId, normalizedHeight] : null
+      })
+      .filter((entry): entry is [string, number] => Boolean(entry)),
+  )
+}
+
 export function readSheetColumnWidthPreferences(sheetId: string) {
   if (!sheetId) {
     return {}
@@ -121,6 +140,35 @@ export function writeSheetColumnWidthPreferences(
       sheetColumnWidths: {
         ...currentPreferences.layout?.sheetColumnWidths,
         [sheetId]: normalizedWidths,
+      },
+    },
+  }))
+}
+
+export function readSheetRowHeightPreferences(sheetId: string) {
+  if (!sheetId) {
+    return {}
+  }
+
+  return normalizeSheetRowHeightPreferences(readUiPreferences().layout?.sheetRowHeights?.[sheetId])
+}
+
+export function writeSheetRowHeightPreferences(
+  sheetId: string,
+  heights: Record<string, number>,
+) {
+  if (!sheetId) {
+    return
+  }
+
+  const normalizedHeights = normalizeSheetRowHeightPreferences(heights)
+  updateUiPreferences((currentPreferences) => ({
+    ...currentPreferences,
+    layout: {
+      ...currentPreferences.layout,
+      sheetRowHeights: {
+        ...currentPreferences.layout?.sheetRowHeights,
+        [sheetId]: normalizedHeights,
       },
     },
   }))

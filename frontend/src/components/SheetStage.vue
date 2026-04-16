@@ -64,7 +64,9 @@ import UiButton from '@/components/ui/UiButton.vue'
 import { useAuthStore } from '@/stores/auth'
 import {
   readSheetColumnWidthPreferences,
+  readSheetRowHeightPreferences,
   writeSheetColumnWidthPreferences,
+  writeSheetRowHeightPreferences,
 } from '@/preferences/uiPreferences'
 import { workspaceDataGridTheme } from '@/theme/dataGridTheme'
 import type {
@@ -214,6 +216,7 @@ interface GridApiLike<TRow> {
       ranges: ReadonlyArray<{ rowKey: string | number; columnKeys: readonly string[] }>,
       options?: { immediate?: boolean; reason?: string },
     ): void
+    reapply?(): void
   }
 }
 
@@ -270,6 +273,11 @@ interface GridHeaderTarget {
   columnIndex: number
 }
 
+interface GridRowHeightTarget {
+  rowId: string
+  rowIndex: number
+}
+
 interface GridEditingSectionLike {
   editingCellValue: string
   isEditingCell(row: GridSourceRowNode, columnKey: string): boolean
@@ -288,6 +296,7 @@ interface GridEditingSectionLike {
 
 interface GridRuntimeLike {
   getBodyRowAtIndex?(rowIndex: number): GridSourceRowNode | null
+  resolveBodyRowIndexById?(rowId: string | number): number
   copySelectedCells?(trigger?: 'keyboard' | 'context-menu'): Promise<boolean>
   pasteSelectedCells?(
     trigger?: 'keyboard' | 'context-menu',
@@ -298,10 +307,17 @@ interface GridRuntimeLike {
   api?: {
     rows?: {
       applyEdits(edits: Array<{ rowId: string | number; data: Record<string, unknown> }>): boolean
+      getCount?(): number
     }
     selection?: {
       getSnapshot(): unknown
       setSnapshot(snapshot: GridRuntimeSelectionSnapshotLike): void
+    }
+    view?: {
+      getRowHeightOverride?(rowIndex: number): number | null
+      getRowHeightOverridesSnapshot?(): Map<number, number> | null
+      setRowHeightOverride?(rowIndex: number, height: number | null): void
+      reapply?(): void
     }
   }
   tableStageProps?: {
@@ -363,12 +379,16 @@ const GRID_LINES = {
   pinnedSeparators: false,
 } as const
 
+const BASE_GRID_ROW_HEIGHT = 26
+
 const GRID_VIRTUALIZATION = {
   rows: true,
   columns: true,
   rowOverscan: 6,
   columnOverscan: 1,
 } as const
+
+const GRID_CONTROL_PANEL_SURFACE_IDS = ['column-layout', 'advanced-filter', 'find-replace'] as const
 
 const TypedDataGrid = defineDataGridComponent<GridRow>()
 
@@ -418,6 +438,7 @@ const inputRows = ref<GridRow[]>([])
 const inputColumns = ref<SheetGridColumn[]>([])
 const inputStyles = ref<SheetStyleRule[]>([])
 const localSheetColumnWidths = ref<Record<string, number>>({})
+const localSheetRowHeights = ref<Record<string, number>>({})
 const runtimeRows = ref<GridRow[]>([])
 const runtimeColumns = ref<SheetGridColumn[]>([])
 const runtimeStyles = ref<SheetStyleRule[]>([])
@@ -507,7 +528,14 @@ let indexPaneCanvasObserver: MutationObserver | null = null
 let indexPaneCanvasResizeObserver: ResizeObserver | null = null
 let indexPaneCanvasRefreshFrame: number | null = null
 let indexPaneCanvasViewportListenersCleanup: (() => void) | null = null
+let gridControlPanelObserver: MutationObserver | null = null
+let hadOpenGridControlPanel = false
 let gridCanvasColorProbe: HTMLDivElement | null = null
+let rowHeightApplyFrame: number | null = null
+let pendingGridStructuralClickSuppression:
+  | { kind: 'row-resize' | 'column-resize'; until: number }
+  | null = null
+let pendingRowHeightPersistTarget: GridRowHeightTarget | null = null
 
 type IndexPaneSelectionVariant = 'single' | 'top' | 'middle' | 'bottom'
 
@@ -523,6 +551,38 @@ function clearIndexPaneCanvasRefreshFrame() {
     window.cancelAnimationFrame(indexPaneCanvasRefreshFrame)
     indexPaneCanvasRefreshFrame = null
   }
+}
+
+function clearRowHeightApplyFrame() {
+  if (rowHeightApplyFrame !== null) {
+    window.cancelAnimationFrame(rowHeightApplyFrame)
+    rowHeightApplyFrame = null
+  }
+}
+
+function scheduleGridStructuralClickSuppression(kind: 'row-resize' | 'column-resize') {
+  pendingGridStructuralClickSuppression = {
+    kind,
+    until: Date.now() + 400,
+  }
+}
+
+function shouldSuppressGridStructuralClick(target: HTMLElement) {
+  const pendingSuppression = pendingGridStructuralClickSuppression
+  if (!pendingSuppression) {
+    return false
+  }
+
+  if (Date.now() > pendingSuppression.until) {
+    pendingGridStructuralClickSuppression = null
+    return false
+  }
+
+  if (pendingSuppression.kind === 'row-resize') {
+    return Boolean(target.closest('.row-resize-handle, .datagrid-stage__row-index-cell'))
+  }
+
+  return Boolean(target.closest('.col-resize, .grid-cell--header[data-column-key]'))
 }
 
 function syncGridChromeCanvasViewports() {
@@ -607,6 +667,50 @@ function disconnectIndexPaneCanvasResizeObserver() {
 function disconnectIndexPaneCanvasObserver() {
   indexPaneCanvasObserver?.disconnect()
   indexPaneCanvasObserver = null
+}
+
+function hasOpenGridControlPanels() {
+  if (typeof document === 'undefined') {
+    return false
+  }
+
+  if (document.querySelector('.sheet-style-toolbar-module__panel')) {
+    return true
+  }
+
+  return GRID_CONTROL_PANEL_SURFACE_IDS.some((surfaceId) =>
+    Boolean(document.querySelector(`[data-datagrid-overlay-surface-id="${surfaceId}"]`)),
+  )
+}
+
+function disconnectGridControlPanelObserver() {
+  gridControlPanelObserver?.disconnect()
+  gridControlPanelObserver = null
+}
+
+function syncGridControlPanelFocusRestore() {
+  const hasOpenPanel = hasOpenGridControlPanels()
+  if (hadOpenGridControlPanel && !hasOpenPanel) {
+    scheduleGridFocusRestore()
+  }
+
+  hadOpenGridControlPanel = hasOpenPanel
+}
+
+function ensureGridControlPanelObserver() {
+  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') {
+    return
+  }
+
+  disconnectGridControlPanelObserver()
+  hadOpenGridControlPanel = hasOpenGridControlPanels()
+  gridControlPanelObserver = new MutationObserver(() => {
+    syncGridControlPanelFocusRestore()
+  })
+  gridControlPanelObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+  })
 }
 
 function disposeGridCanvasColorProbe() {
@@ -975,6 +1079,11 @@ function drawIndexPaneCanvas() {
     'var(--datagrid-row-band-striped-bg)',
     'rgba(0, 0, 0, 0)',
   )
+  const rowGroupBackgroundColor = resolveGridCanvasColor(
+    stage,
+    'var(--datagrid-row-band-group-bg)',
+    'rgba(0, 0, 0, 0)',
+  )
   const selectionFillColor = resolveGridCanvasColor(
     stage,
     'var(--sheet-grid-index-selection-fill, var(--datagrid-selection-range-bg))',
@@ -1039,6 +1148,8 @@ function drawIndexPaneCanvas() {
         rowElement.classList.contains('grid-row--hovered')
       ) {
         bandColor = rowHoverBackgroundColor
+      } else if (rowElement?.classList.contains('row--group')) {
+        bandColor = rowGroupBackgroundColor
       } else if (rowElement?.classList.contains('grid-row--striped')) {
         bandColor = rowStripedBackgroundColor
       }
@@ -1203,8 +1314,20 @@ function resetCellHistoryMenu() {
   // Native package menus manage their own open/close state.
 }
 
-function closeSheetActivityPanel() {
+function closeSheetActivityPanel(options?: { restoreGridFocus?: boolean }) {
   sheetActivityPanelOpen.value = false
+
+  if (options?.restoreGridFocus) {
+    scheduleGridFocusRestore()
+  }
+}
+
+function handleCellHistoryDialogClose(options?: { restoreGridFocus?: boolean }) {
+  closeCellHistoryDialogState()
+
+  if (options?.restoreGridFocus) {
+    scheduleGridFocusRestore()
+  }
 }
 
 function openSheetActivityPanel() {
@@ -1221,7 +1344,7 @@ function openSheetActivityPanel() {
 
 function toggleSheetActivityPanel() {
   if (sheetActivityPanelOpen.value) {
-    closeSheetActivityPanel()
+    closeSheetActivityPanel({ restoreGridFocus: true })
     return
   }
 
@@ -1355,6 +1478,7 @@ function schedulePlaceholderRowsRestore() {
 function handleGridStateUpdate(state: DataGridUnifiedState<GridRow> | null) {
   const hadActiveAdvancedFilter = hasActiveAdvancedGridFilter.value
   activeGridState.value = state
+  scheduleApplyPersistedGridRowHeights()
   const hasActiveFilterNow = hasActiveAdvancedFilter(state?.rows.snapshot.filterModel ?? null)
 
   if (hasActiveFilterNow) {
@@ -1639,7 +1763,7 @@ const {
   buildCellHistoryTarget,
   scheduleCellHistorySync,
   openCellHistoryDialog,
-  handleCellHistoryDialogClose,
+  handleCellHistoryDialogClose: closeCellHistoryDialogState,
   resetCellHistoryState,
 } = useSheetCellHistory({
   readGridColumns,
@@ -1657,7 +1781,7 @@ const {
   scheduleDraftChange,
   flushDraftChange,
   getCurrentDraft,
-  markCommitted,
+  markCommitted: markDraftHistoryCommitted,
   clearSyncTimer,
   serializeGridPayload,
 } = useSheetGridDraftHistory({
@@ -1769,6 +1893,24 @@ const isInlineFormulaEditorOpen = computed(() => Boolean(inlineFormulaCell.value
 const hasSheetSidePaneOpen = computed(
   () => Boolean(inlineFormulaCell.value) || cellHistoryDialogOpen.value || sheetActivityPanelOpen.value,
 )
+
+function scheduleGridFocusRestore(target = resolveGridFocusRestoreTarget()) {
+  queueGridFocusRestore(target)
+  void nextTick(() => {
+    schedulePendingGridFocusRestore()
+  })
+}
+
+function markCommitted(payload: SheetGridUpdateInput) {
+  const hydratedColumns = applyLocalSheetColumnWidths(cloneGridColumns(payload.columns))
+  markDraftHistoryCommitted({
+    columns: hydratedColumns,
+    rows: cloneGridRows(payload.rows),
+    styles: cloneGridStyles(payload.styles),
+  })
+  scheduleGridFocusRestore()
+}
+
 const showsMultiRangeActiveCellOutline = computed(() => {
   const snapshot = gridSelectionSnapshot.value
   const ranges = snapshot?.ranges ?? []
@@ -1884,6 +2026,204 @@ function persistGridColumnWidths(columns: SheetGridColumn[]) {
 
   localSheetColumnWidths.value = nextWidths
   writeSheetColumnWidthPreferences(props.sheetId, nextWidths)
+}
+
+function normalizeSheetRowHeight(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null
+}
+
+function areSheetRowHeightsEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+) {
+  const leftEntries = Object.entries(left)
+  const rightEntries = Object.entries(right)
+  if (leftEntries.length !== rightEntries.length) {
+    return false
+  }
+
+  return leftEntries.every(([rowId, height]) => right[rowId] === height)
+}
+
+function persistLocalSheetRowHeights(nextHeights: Record<string, number>) {
+  if (!props.sheetId) {
+    if (Object.keys(localSheetRowHeights.value).length > 0) {
+      localSheetRowHeights.value = {}
+    }
+    return
+  }
+
+  if (areSheetRowHeightsEqual(localSheetRowHeights.value, nextHeights)) {
+    return
+  }
+
+  localSheetRowHeights.value = nextHeights
+  writeSheetRowHeightPreferences(props.sheetId, nextHeights)
+}
+
+function loadLocalSheetRowHeights(sheetId: string | null) {
+  const nextHeights = sheetId ? readSheetRowHeightPreferences(sheetId) : {}
+  if (areSheetRowHeightsEqual(localSheetRowHeights.value, nextHeights)) {
+    return
+  }
+
+  localSheetRowHeights.value = nextHeights
+}
+
+function persistGridRowHeightPreference(rowId: string, height: unknown) {
+  const nextHeights = { ...localSheetRowHeights.value }
+  const normalizedHeight = normalizeSheetRowHeight(height)
+  if (normalizedHeight && normalizedHeight !== BASE_GRID_ROW_HEIGHT) {
+    nextHeights[rowId] = normalizedHeight
+  } else {
+    delete nextHeights[rowId]
+  }
+
+  persistLocalSheetRowHeights(nextHeights)
+}
+
+function resolveGridRowHeightTargetFromElement(target: HTMLElement): GridRowHeightTarget | null {
+  const rowIndexCell = target.closest<HTMLElement>('.datagrid-stage__row-index-cell[data-row-id][data-row-index]')
+  if (!rowIndexCell) {
+    return null
+  }
+
+  const rowId = rowIndexCell.dataset.rowId
+  const rowIndexValue = rowIndexCell.dataset.rowIndex
+  if (!rowId || !rowIndexValue) {
+    return null
+  }
+
+  const rowIndex = Number(rowIndexValue)
+  if (!Number.isFinite(rowIndex)) {
+    return null
+  }
+
+  return {
+    rowId,
+    rowIndex,
+  }
+}
+
+function applyPersistedGridRowHeights() {
+  const runtime = getGridRuntime()
+  const rowCount = runtime?.api?.rows?.getCount?.() ?? 0
+  const getBodyRowAtIndex = runtime?.getBodyRowAtIndex
+  const resolveBodyRowIndexById = runtime?.resolveBodyRowIndexById
+  const view = runtime?.api?.view
+  if (!view?.setRowHeightOverride) {
+    return
+  }
+
+  let hasChanges = false
+
+  if (resolveBodyRowIndexById && view.getRowHeightOverride) {
+    const desiredOverrides = new Map<number, number>()
+    for (const [rowId, preferredHeight] of Object.entries(localSheetRowHeights.value)) {
+      const rowIndex = resolveBodyRowIndexById(rowId)
+      if (!Number.isFinite(rowIndex) || rowIndex < 0) {
+        continue
+      }
+
+      const nextOverride = normalizeSheetRowHeight(preferredHeight)
+      if (!nextOverride || nextOverride === BASE_GRID_ROW_HEIGHT) {
+        continue
+      }
+
+      desiredOverrides.set(rowIndex, nextOverride)
+      const currentOverride = view.getRowHeightOverride(rowIndex)
+      if (currentOverride === nextOverride) {
+        continue
+      }
+
+      view.setRowHeightOverride(rowIndex, nextOverride)
+      hasChanges = true
+    }
+
+    const currentOverrides = view.getRowHeightOverridesSnapshot?.() ?? null
+    if (currentOverrides) {
+      for (const [rowIndex, currentOverride] of currentOverrides.entries()) {
+        if (desiredOverrides.has(rowIndex)) {
+          continue
+        }
+
+        if (currentOverride === null || currentOverride === undefined) {
+          continue
+        }
+
+        view.setRowHeightOverride(rowIndex, null)
+        hasChanges = true
+      }
+    }
+
+    if (hasChanges) {
+      view.reapply?.()
+      scheduleIndexPaneCanvasRefresh()
+    }
+    return
+  }
+
+  if (!rowCount || !getBodyRowAtIndex) {
+    return
+  }
+
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const rowNode = getBodyRowAtIndex(rowIndex)
+    if (rowNode?.rowId === null || rowNode?.rowId === undefined) {
+      continue
+    }
+
+    const preferredHeight = localSheetRowHeights.value[String(rowNode.rowId)] ?? null
+    const nextOverride = preferredHeight && preferredHeight !== BASE_GRID_ROW_HEIGHT ? preferredHeight : null
+    const currentOverride = view.getRowHeightOverride?.(rowIndex) ?? null
+    if (currentOverride === nextOverride) {
+      continue
+    }
+
+    view.setRowHeightOverride(rowIndex, nextOverride)
+    hasChanges = true
+  }
+
+  if (hasChanges) {
+    view.reapply?.()
+    scheduleIndexPaneCanvasRefresh()
+  }
+}
+
+function scheduleApplyPersistedGridRowHeights() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  clearRowHeightApplyFrame()
+  rowHeightApplyFrame = window.requestAnimationFrame(() => {
+    rowHeightApplyFrame = null
+    applyPersistedGridRowHeights()
+  })
+}
+
+function schedulePersistedGridRowHeightSync(target: GridRowHeightTarget | null) {
+  if (!target || typeof window === 'undefined') {
+    return
+  }
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const height = getGridRuntime()?.api?.view?.getRowHeightOverride?.(target.rowIndex)
+      persistGridRowHeightPreference(target.rowId, height)
+      scheduleApplyPersistedGridRowHeights()
+    })
+  })
+}
+
+function handleWindowGridMouseUp() {
+  const target = pendingRowHeightPersistTarget
+  pendingRowHeightPersistTarget = null
+  if (!target) {
+    return
+  }
+
+  schedulePersistedGridRowHeightSync(target)
 }
 
 function readGridStyles() {
@@ -2906,7 +3246,7 @@ const {
   syncInlineFormulaState,
   handleGridKeydownCapture,
   handleGridClickCapture: handleFormulaGridClickCapture,
-  handleGridDoubleClickCapture,
+  handleGridDoubleClickCapture: handleFormulaGridDoubleClickCapture,
 } = useGridFormulaNavigation({
   gridSelectionSnapshot,
   gridSelectionInteractionSource,
@@ -3008,10 +3348,13 @@ watch(
   () => [props.workspaceId, props.sheetId, props.sheet?.updated_at ?? null],
   () => {
     const context = getSheetDraftContext()
+    const focusRestoreTarget = resolveGridFocusRestoreTarget()
+    pendingRowHeightPersistTarget = null
     clearPlaceholderRowsRestoreFrame()
     activeGridState.value = null
     shouldDelayPlaceholderRowsRestore.value = false
     loadLocalSheetColumnWidths(props.sheetId)
+    loadLocalSheetRowHeights(props.sheetId)
     const hydratedColumns = applyLocalSheetColumnWidths(cloneGridColumns(props.sheet?.columns ?? []))
     resetGridSessionState()
     clearGridHistory()
@@ -3036,8 +3379,32 @@ watch(
     isGridCellEditorActive.value = false
     emit('draftChange', null, context)
     emit('dirtyChange', false, context)
+
+    if (focusRestoreTarget) {
+      scheduleGridFocusRestore(focusRestoreTarget)
+    }
   },
   { immediate: true },
+)
+
+watch(localSheetRowHeights, () => {
+  scheduleApplyPersistedGridRowHeights()
+})
+
+watch(gridApi, (api) => {
+  if (api) {
+    scheduleApplyPersistedGridRowHeights()
+  }
+})
+
+watch(
+  () =>
+    (runtimeRows.value.length ? runtimeRows.value : inputRows.value)
+      .map((row) => String(row.id ?? ''))
+      .join('\u0001'),
+  () => {
+    scheduleApplyPersistedGridRowHeights()
+  },
 )
 
 watch(selectedStyleTargetsSignature, (nextValue) => {
@@ -3201,6 +3568,8 @@ onMounted(() => {
   }
 
   window.addEventListener('keydown', handleWindowHistoryKeydown, true)
+  window.addEventListener('mouseup', handleWindowGridMouseUp, true)
+  ensureGridControlPanelObserver()
 })
 
 onBeforeUnmount(() => {
@@ -3209,7 +3578,11 @@ onBeforeUnmount(() => {
   }
 
   window.removeEventListener('keydown', handleWindowHistoryKeydown, true)
+  window.removeEventListener('mouseup', handleWindowGridMouseUp, true)
+  pendingRowHeightPersistTarget = null
+  disconnectGridControlPanelObserver()
   clearPlaceholderRowsRestoreFrame()
+  clearRowHeightApplyFrame()
   clearIndexPaneCanvasRefreshFrame()
   disconnectIndexPaneCanvasViewportListeners()
   disconnectIndexPaneCanvasResizeObserver()
@@ -3399,26 +3772,11 @@ function buildSelectionAggregatesLabelFromTargets() {
     parts.push(`Max: ${formatSelectionSummaryNumber(numericMax)}`)
   }
 
-  return parts.join(' | ')
+  return parts.join(' · ')
 }
 
 function resolveGridSelectionAggregatesLabel() {
-  const targets = selectedStyleTargets.value
-  if (targets.length <= 1) {
-    return ''
-  }
-
-  const fallbackLabel = buildSelectionAggregatesLabelFromTargets()
-  if (!fallbackLabel) {
-    return ''
-  }
-
-  const snapshot = gridSelectionSnapshot.value
-  if (selectionTouchesPlaceholderRows(snapshot)) {
-    return fallbackLabel
-  }
-
-  return dataGridRef.value?.getSelectionAggregatesLabel?.() ?? fallbackLabel
+  return buildSelectionAggregatesLabelFromTargets()
 }
 
 function resetGridSessionState() {
@@ -3517,6 +3875,20 @@ function handleGridMouseDownCapture(event: MouseEvent) {
   closeFormulaIndicatorTooltip('pointer')
 
   if (event.button !== 0) {
+    return
+  }
+
+  const target = event.target
+  if (target instanceof HTMLElement) {
+    if (target.closest('.row-resize-handle')) {
+      scheduleGridStructuralClickSuppression('row-resize')
+      pendingRowHeightPersistTarget = resolveGridRowHeightTargetFromElement(target)
+    } else if (target.closest('.col-resize')) {
+      scheduleGridStructuralClickSuppression('column-resize')
+    }
+  }
+
+  if (target instanceof HTMLElement && isGridNativeInteractiveControlTarget(target)) {
     return
   }
 
@@ -3675,6 +4047,14 @@ function isGridHeaderInteractiveControlTarget(target: HTMLElement) {
   )
 }
 
+function isGridNativeInteractiveControlTarget(target: HTMLElement) {
+  return Boolean(
+    target.closest(
+      'button, input, textarea, select, .row-resize-handle, .col-resize, .cell-fill-handle, .datagrid-stage__selection-handle--cell, .datagrid-overlay-drag-handle, [data-datagrid-column-menu-trigger], [data-datagrid-column-menu-button], [data-datagrid-menu-action], [data-datagrid-copy-menu]',
+    ),
+  )
+}
+
 function resolveGridHeaderTarget(event: MouseEvent): GridHeaderTarget | null {
   const target = event.target
   if (!(target instanceof HTMLElement)) {
@@ -3811,7 +4191,12 @@ function handleGridClickCapture(event: MouseEvent) {
   closeFormulaIndicatorTooltip('pointer')
 
   const target = event.target
-  if (target instanceof HTMLElement && isGridHeaderInteractiveControlTarget(target)) {
+  if (target instanceof HTMLElement && shouldSuppressGridStructuralClick(target)) {
+    event.stopPropagation()
+    return
+  }
+
+  if (target instanceof HTMLElement && isGridNativeInteractiveControlTarget(target)) {
     return
   }
 
@@ -3824,6 +4209,19 @@ function handleGridClickCapture(event: MouseEvent) {
   handleFormulaGridClickCapture(event, () => {
     scheduleInlineFormulaGridRefocus()
   })
+}
+
+function handleGridDoubleClickCapture(event: MouseEvent) {
+  const target = event.target
+  if (target instanceof HTMLElement && target.closest('.row-resize-handle')) {
+    schedulePersistedGridRowHeightSync(resolveGridRowHeightTargetFromElement(target))
+  }
+
+  if (target instanceof HTMLElement && isGridNativeInteractiveControlTarget(target)) {
+    return
+  }
+
+  handleFormulaGridDoubleClickCapture(event)
 }
 
 function scheduleFormulaCellRefresh() {
@@ -6281,7 +6679,7 @@ defineExpose<SheetStageHandle>({
             :toolbar-modules="gridToolbarModules"
             render-mode="virtualization"
             layout-mode="fill"
-            :base-row-height="26"
+            :base-row-height="BASE_GRID_ROW_HEIGHT"
             show-row-index
             :row-selection="false"
             row-reorder
@@ -6409,7 +6807,7 @@ defineExpose<SheetStageHandle>({
           :workspace-id="workspaceId"
           :sheet-id="sheetId"
           :target="cellHistoryDialogTarget"
-          @close="handleCellHistoryDialogClose"
+          @close="handleCellHistoryDialogClose({ restoreGridFocus: true })"
         />
 
         <SheetActivityPanel
@@ -6417,7 +6815,7 @@ defineExpose<SheetStageHandle>({
           :open="sheetActivityPanelOpen"
           :workspace-id="workspaceId"
           :sheet-id="sheetId"
-          @close="closeSheetActivityPanel"
+          @close="closeSheetActivityPanel({ restoreGridFocus: true })"
         />
       </div>
     </section>

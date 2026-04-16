@@ -270,6 +270,8 @@ export function useInlineFormulaEditorSession(input: {
 
       if (target) {
         focusGridSelectionAnchor(target)
+      } else if (selectionSnapshot) {
+        focusGridSelectionAnchor()
       }
       clearPendingGridFocusRestore()
     })
