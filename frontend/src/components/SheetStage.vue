@@ -13,6 +13,7 @@ import {
   defineDataGridComponent,
   defineDataGridFilterCellReader,
   defineDataGridSelectionCellReader,
+  type DataGridAppViewMode,
   type DataGridAppToolbarModule,
   type DataGridAppClientRowModelOptions,
   type DataGridAppColumnInput,
@@ -25,9 +26,17 @@ import {
   type DataGridPlaceholderRowsProp,
   type DataGridRowIndexMenuProp,
 } from '@affino/datagrid-vue-app'
+import {
+  UiMenu,
+  UiMenuContent,
+  UiMenuItem,
+  UiMenuSeparator,
+  UiMenuTrigger,
+} from '@affino/menu-vue'
 
 import CellHistoryDialog from '@/components/CellHistoryDialog.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import GanttSetupDialog from '@/components/GanttSetupDialog.vue'
 import SheetActivityPanel from '@/components/SheetActivityPanel.vue'
 import InlineFormulaPane from '@/components/formulas/InlineFormulaPane.vue'
 import RenameColumnDialog from '@/components/RenameColumnDialog.vue'
@@ -65,10 +74,14 @@ import { useAuthStore } from '@/stores/auth'
 import {
   readSheetColumnWidthPreferences,
   readSheetFilterModelPreference,
+  readSheetGanttConfigPreference,
   readSheetRowHeightPreferences,
+  readSheetViewModePreference,
   writeSheetColumnWidthPreferences,
   writeSheetFilterModelPreference,
+  writeSheetGanttConfigPreference,
   writeSheetRowHeightPreferences,
+  writeSheetViewModePreference,
 } from '@/preferences/uiPreferences'
 import { workspaceDataGridTheme } from '@/theme/dataGridTheme'
 import type {
@@ -122,6 +135,15 @@ import {
   normalizeSpreadsheetWorkbookFormulaSheets,
   type SpreadsheetWorkbookFormulaSheet,
 } from '@/utils/spreadsheetWorkbookModel'
+import {
+  SHEET_GANTT_ZOOM_OPTIONS,
+  autoDetectSheetGanttConfig,
+  isSheetGanttConfigUsable,
+  mergeSheetGanttConfigPreference,
+  sanitizeSheetGanttConfigPreference,
+  type SheetGanttConfigFieldKey,
+  type SheetGanttConfigPreference,
+} from '@/utils/sheetGantt'
 
 type GridRow = Record<string, unknown>
 type GridPasteOptions = {
@@ -275,6 +297,10 @@ interface GridHeaderTarget {
   columnIndex: number
 }
 
+interface GridCornerTarget {
+  kind: 'select-all'
+}
+
 interface GridRowHeightTarget {
   rowId: string
   rowIndex: number
@@ -355,7 +381,13 @@ interface GridColumnConstraintsLike {
 interface GridColumnPresentationLike<TRow> {
   align?: 'left' | 'center' | 'right'
   headerAlign?: 'left' | 'center' | 'right'
-  options?: string[]
+  options?:
+    | readonly (string | { label: string; value: string })[]
+    | ((
+        row: TRow,
+      ) =>
+        | readonly (string | { label: string; value: string })[]
+        | Promise<readonly (string | { label: string; value: string })[]>)
   cellRenderer?: DataGridAppColumnInput<TRow>['cellRenderer']
 }
 
@@ -442,6 +474,8 @@ const inputStyles = ref<SheetStyleRule[]>([])
 const localSheetColumnWidths = ref<Record<string, number>>({})
 const localSheetFilterModel = ref<DataGridFilterSnapshot | null>(null)
 const localSheetRowHeights = ref<Record<string, number>>({})
+const localSheetViewMode = ref<DataGridAppViewMode>('table')
+const localSheetGanttConfig = ref<SheetGanttConfigPreference | null>(null)
 const runtimeRows = ref<GridRow[]>([])
 const runtimeColumns = ref<SheetGridColumn[]>([])
 const runtimeStyles = ref<SheetStyleRule[]>([])
@@ -461,6 +495,8 @@ const renameColumnTargetKey = ref<string | null>(null)
 const renameColumnInitialValue = ref('')
 const renameColumnInitialType = ref<GridColumnType>('text')
 const renameColumnInitialOptions = ref<string[]>([])
+const ganttSetupDialogOpen = ref(false)
+const isApplyingDerivedGanttEdits = ref(false)
 const systemColumnReplacementDialogOpen = ref(false)
 const pendingSystemColumnReplacement = ref<{
   columnKey: string
@@ -532,6 +568,9 @@ let indexPaneCanvasResizeObserver: ResizeObserver | null = null
 let indexPaneCanvasRefreshFrame: number | null = null
 let indexPaneCanvasViewportListenersCleanup: (() => void) | null = null
 let gridControlPanelObserver: MutationObserver | null = null
+let ganttPaneWidthObserver: ResizeObserver | null = null
+let ganttPaneWidthEnsureFrame: number | null = null
+let ganttPaneWidthPersistTimeout: number | null = null
 let hadOpenGridControlPanel = false
 let gridCanvasColorProbe: HTMLDivElement | null = null
 let rowHeightApplyFrame: number | null = null
@@ -1578,6 +1617,218 @@ const renameColumnDialogValidator = computed<((value: string) => string | null) 
   () => validateSpreadsheetColumnFormulaAlias,
 )
 
+const currentSheetGanttColumns = computed(() => inputColumns.value)
+const autoDetectedSheetGanttConfig = computed(() => autoDetectSheetGanttConfig(currentSheetGanttColumns.value))
+const effectiveSheetGanttConfig = computed(() =>
+  sanitizeSheetGanttConfigPreference(
+    mergeSheetGanttConfigPreference(localSheetGanttConfig.value, autoDetectedSheetGanttConfig.value),
+    currentSheetGanttColumns.value,
+  ),
+)
+const canRenderGanttView = computed(() => isSheetGanttConfigUsable(effectiveSheetGanttConfig.value))
+const activeGridViewMode = computed<DataGridAppViewMode>(() =>
+  localSheetViewMode.value === 'gantt' && canRenderGanttView.value ? 'gantt' : 'table',
+)
+const dataGridGanttConfig = computed(() => {
+  const config = effectiveSheetGanttConfig.value
+  if (activeGridViewMode.value !== 'gantt' || !isSheetGanttConfigUsable(config)) {
+    return false
+  }
+
+  return {
+    idKey: 'id',
+    labelKey: config.labelKey,
+    startKey: config.startKey ?? undefined,
+    endKey: config.endKey ?? undefined,
+    baselineStartKey: config.baselineStartKey,
+    baselineEndKey: config.baselineEndKey,
+    progressKey: config.progressKey,
+    dependencyKey: config.dependencyKey,
+    computedCriticalPath: true,
+    zoomLevel: config.zoomLevel,
+    paneWidth: config.paneWidth ?? 420,
+    workingCalendar: {
+      workingWeekdays: [1, 2, 3, 4, 5],
+    },
+  }
+})
+const ganttToolbarNote = computed(() => {
+  if (activeGridViewMode.value === 'gantt' && effectiveSheetGanttConfig.value) {
+    const startLabel = effectiveSheetGanttConfig.value.startKey
+      ? resolveColumnLabel(effectiveSheetGanttConfig.value.startKey)
+      : 'Start'
+    const endLabel = effectiveSheetGanttConfig.value.endKey
+      ? resolveColumnLabel(effectiveSheetGanttConfig.value.endKey)
+      : 'End'
+    return `Bars stay synced with ${startLabel} and ${endLabel}.`
+  }
+
+  if (canRenderGanttView.value) {
+    return 'Open gantt on top of the same rows without duplicating the sheet.'
+  }
+
+  return 'Map task, start, and end columns, or let the app add a ready-made gantt scaffold.'
+})
+
+const GANTT_PREPARE_ROLE_ORDER: readonly SheetGanttConfigFieldKey[] = [
+  'labelKey',
+  'startKey',
+  'endKey',
+  'durationKey',
+  'progressKey',
+  'dependencyKey',
+]
+
+const GANTT_PREPARE_COLUMN_TEMPLATES: Readonly<Record<SheetGanttConfigFieldKey, {
+  label: string
+  columnType: GridColumnType
+  width: number
+}>> = {
+  labelKey: {
+    label: 'Task',
+    columnType: 'text',
+    width: 260,
+  },
+  startKey: {
+    label: 'Start',
+    columnType: 'date',
+    width: 168,
+  },
+  endKey: {
+    label: 'End',
+    columnType: 'date',
+    width: 168,
+  },
+  durationKey: {
+    label: 'Duration',
+    columnType: 'duration',
+    width: 132,
+  },
+  baselineStartKey: {
+    label: 'Baseline Start',
+    columnType: 'date',
+    width: 168,
+  },
+  baselineEndKey: {
+    label: 'Baseline End',
+    columnType: 'date',
+    width: 168,
+  },
+  progressKey: {
+    label: 'Progress',
+    columnType: 'percent',
+    width: 132,
+  },
+  dependencyKey: {
+    label: 'Dependencies',
+    columnType: 'text',
+    width: 220,
+  },
+}
+
+
+function clearGanttPaneWidthEnsureFrame() {
+  if (ganttPaneWidthEnsureFrame !== null && typeof window !== 'undefined') {
+    window.cancelAnimationFrame(ganttPaneWidthEnsureFrame)
+  }
+
+  ganttPaneWidthEnsureFrame = null
+}
+
+function clearGanttPaneWidthPersistTimeout() {
+  if (ganttPaneWidthPersistTimeout !== null && typeof window !== 'undefined') {
+    window.clearTimeout(ganttPaneWidthPersistTimeout)
+  }
+
+  ganttPaneWidthPersistTimeout = null
+}
+
+function disconnectGanttPaneWidthObserver() {
+  ganttPaneWidthObserver?.disconnect()
+  ganttPaneWidthObserver = null
+  clearGanttPaneWidthEnsureFrame()
+  clearGanttPaneWidthPersistTimeout()
+}
+
+function resolveGanttTablePaneElement() {
+  return gridRootRef.value?.querySelector<HTMLElement>('.datagrid-gantt-stage__table') ?? null
+}
+
+function schedulePersistGanttPaneWidth(width: number) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  const normalizedWidth = Math.max(280, Math.round(width))
+  if (!Number.isFinite(normalizedWidth) || activeGridViewMode.value !== 'gantt') {
+    return
+  }
+
+  clearGanttPaneWidthPersistTimeout()
+  ganttPaneWidthPersistTimeout = window.setTimeout(() => {
+    ganttPaneWidthPersistTimeout = null
+
+    if (activeGridViewMode.value !== 'gantt') {
+      return
+    }
+
+    const currentPaneWidth = effectiveSheetGanttConfig.value?.paneWidth ?? null
+    if (currentPaneWidth === normalizedWidth) {
+      return
+    }
+
+    const nextConfig = sanitizeSheetGanttConfigPreference(
+      {
+        ...(effectiveSheetGanttConfig.value ?? {}),
+        paneWidth: normalizedWidth,
+      },
+      currentSheetGanttColumns.value,
+    )
+    persistLocalSheetGanttConfig(nextConfig)
+  }, 120)
+}
+
+function ensureGanttPaneWidthObserver() {
+  disconnectGanttPaneWidthObserver()
+
+  if (activeGridViewMode.value !== 'gantt' || typeof ResizeObserver === 'undefined') {
+    return
+  }
+
+  const observePane = () => {
+    const pane = resolveGanttTablePaneElement()
+    if (!pane) {
+      return false
+    }
+
+    ganttPaneWidthObserver = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      const nextWidth = entry?.contentRect.width ?? pane.getBoundingClientRect().width
+      if (nextWidth > 0) {
+        schedulePersistGanttPaneWidth(nextWidth)
+      }
+    })
+    ganttPaneWidthObserver.observe(pane)
+
+    const initialWidth = pane.getBoundingClientRect().width
+    if (initialWidth > 0) {
+      schedulePersistGanttPaneWidth(initialWidth)
+    }
+
+    return true
+  }
+
+  if (observePane() || typeof window === 'undefined') {
+    return
+  }
+
+  ganttPaneWidthEnsureFrame = window.requestAnimationFrame(() => {
+    ganttPaneWidthEnsureFrame = null
+    if (activeGridViewMode.value === 'gantt') {
+      observePane()
+    }
+  })
+}
 const currentSheetFormulaReferenceRanges = computed(() => {
   const currentSheet = currentFormulaWorkbookSheet.value
   if (!currentSheet || !inlineFormulaReferenceSpans.value.length) {
@@ -2448,6 +2699,497 @@ function loadLocalSheetFilterModel(sheetId: string, columnKeys: readonly string[
     readSheetFilterModelPreference(sheetId),
     columnKeys,
   )
+}
+
+function areSheetGanttConfigsEqual(
+  left: SheetGanttConfigPreference | null | undefined,
+  right: SheetGanttConfigPreference | null | undefined,
+) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+}
+
+function loadLocalSheetViewMode(sheetId: string | null) {
+  localSheetViewMode.value = sheetId ? readSheetViewModePreference(sheetId) ?? 'table' : 'table'
+}
+
+function persistLocalSheetViewMode(viewMode: DataGridAppViewMode) {
+  if (!props.sheetId) {
+    localSheetViewMode.value = 'table'
+    return
+  }
+
+  localSheetViewMode.value = viewMode
+  writeSheetViewModePreference(props.sheetId, viewMode)
+}
+
+function loadLocalSheetGanttConfig(sheetId: string | null, columns: readonly SheetGridColumn[]) {
+  localSheetGanttConfig.value = sheetId
+    ? sanitizeSheetGanttConfigPreference(readSheetGanttConfigPreference(sheetId), columns)
+    : null
+}
+
+function persistLocalSheetGanttConfig(config: SheetGanttConfigPreference | null) {
+  const normalizedConfig = sanitizeSheetGanttConfigPreference(config, currentSheetGanttColumns.value)
+  if (areSheetGanttConfigsEqual(localSheetGanttConfig.value, normalizedConfig)) {
+    return
+  }
+
+  localSheetGanttConfig.value = normalizedConfig
+  if (!props.sheetId) {
+    return
+  }
+
+  writeSheetGanttConfigPreference(
+    props.sheetId,
+    normalizedConfig as unknown as Record<string, unknown> | null,
+  )
+}
+
+function openGanttSetupDialog() {
+  ganttSetupDialogOpen.value = true
+}
+
+function setSheetViewMode(viewMode: DataGridAppViewMode) {
+  persistLocalSheetViewMode(viewMode)
+}
+
+function activateTableView() {
+  setSheetViewMode('table')
+}
+
+function activateGanttView() {
+  if (!props.sheet) {
+    return
+  }
+
+  const config = effectiveSheetGanttConfig.value
+  if (!isSheetGanttConfigUsable(config)) {
+    openGanttSetupDialog()
+    return
+  }
+
+  persistLocalSheetGanttConfig(config)
+  setSheetViewMode('gantt')
+}
+
+function setGanttZoomLevel(zoomLevel: SheetGanttConfigPreference['zoomLevel']) {
+  const config = sanitizeSheetGanttConfigPreference(
+    {
+      ...(effectiveSheetGanttConfig.value ?? {}),
+      zoomLevel,
+    },
+    currentSheetGanttColumns.value,
+  )
+  persistLocalSheetGanttConfig(config)
+}
+
+function resolveGanttFieldKey(fieldKey: SheetGanttConfigFieldKey) {
+  const config = effectiveSheetGanttConfig.value
+  return config?.[fieldKey] ?? null
+}
+
+function resolveGanttColumn(fieldKey: SheetGanttConfigFieldKey) {
+  const columnKey = resolveGanttFieldKey(fieldKey)
+  return columnKey ? resolveCurrentGridColumn(columnKey) : null
+}
+
+function parseGridDateValue(value: unknown) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : new Date(value.getTime())
+  }
+
+  const normalizedValue = asString(value).trim()
+  if (!normalizedValue) {
+    return null
+  }
+
+  const directDate = new Date(normalizedValue)
+  if (!Number.isNaN(directDate.getTime())) {
+    return directDate
+  }
+
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalizedValue)
+  if (!dateOnlyMatch) {
+    return null
+  }
+
+  const year = Number(dateOnlyMatch[1])
+  const month = Number(dateOnlyMatch[2]) - 1
+  const day = Number(dateOnlyMatch[3])
+  const fallbackDate = new Date(year, month, day)
+  return Number.isNaN(fallbackDate.getTime()) ? null : fallbackDate
+}
+
+function formatGridDateValueForColumn(column: SheetGridColumn | null, value: Date) {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+
+  if (column?.column_type === 'datetime') {
+    const hours = String(value.getHours()).padStart(2, '0')
+    const minutes = String(value.getMinutes()).padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}`
+  }
+
+  return `${year}-${month}-${day}`
+}
+
+function parseDurationDays(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(1, Math.round(value))
+  }
+
+  const normalizedValue = asString(value).trim().toLowerCase()
+  if (!normalizedValue) {
+    return null
+  }
+
+  const directNumber = Number(normalizedValue)
+  if (Number.isFinite(directNumber)) {
+    return Math.max(1, Math.round(directNumber))
+  }
+
+  const numberMatch = /-?\d+(?:\.\d+)?/.exec(normalizedValue)
+  if (!numberMatch) {
+    return null
+  }
+
+  const parsedNumber = Number(numberMatch[0])
+  return Number.isFinite(parsedNumber) ? Math.max(1, Math.round(parsedNumber)) : null
+}
+
+function buildDerivedEndDateValue(row: GridRow) {
+  const startKey = resolveGanttFieldKey('startKey')
+  const endKey = resolveGanttFieldKey('endKey')
+  const durationKey = resolveGanttFieldKey('durationKey')
+  const endColumn = resolveGanttColumn('endKey')
+  if (!startKey || !endKey || !durationKey || !endColumn) {
+    return null
+  }
+
+  if (isSpreadsheetFormulaValue(row[endKey])) {
+    return null
+  }
+
+  const startDate = parseGridDateValue(row[startKey])
+  const durationDays = parseDurationDays(row[durationKey])
+  if (!startDate || durationDays === null) {
+    return null
+  }
+
+  const derivedEndDate = new Date(startDate.getTime())
+  derivedEndDate.setDate(derivedEndDate.getDate() + Math.max(0, durationDays - 1))
+  return formatGridDateValueForColumn(endColumn, derivedEndDate)
+}
+
+function applyRowEditsToRows(
+  rows: GridRow[],
+  edits: Array<{ rowId: string | number; data: Record<string, unknown> }>,
+) {
+  if (!edits.length) {
+    return rows
+  }
+
+  const editMap = new Map(edits.map((edit) => [String(edit.rowId), edit.data]))
+  return rows.map((row) => {
+    const rowId = String(row.id ?? '')
+    const edit = editMap.get(rowId)
+    if (!edit) {
+      return row
+    }
+
+    return {
+      ...row,
+      ...edit,
+    }
+  })
+}
+
+function buildDerivedGanttRowEdits(previousRows: GridRow[], nextRows: GridRow[]) {
+  const startKey = resolveGanttFieldKey('startKey')
+  const endKey = resolveGanttFieldKey('endKey')
+  const durationKey = resolveGanttFieldKey('durationKey')
+  if (!startKey || !endKey || !durationKey) {
+    return []
+  }
+
+  const previousRowsById = new Map(previousRows.map((row) => [String(row.id ?? ''), row]))
+
+  return nextRows.flatMap((row) => {
+    const rowId = String(row.id ?? '')
+    if (!rowId) {
+      return []
+    }
+
+    const previousRow = previousRowsById.get(rowId)
+    const didRelevantValueChange = !previousRow ||
+      previousRow[startKey] !== row[startKey] ||
+      previousRow[durationKey] !== row[durationKey]
+    if (!didRelevantValueChange) {
+      return []
+    }
+
+    const derivedEndValue = buildDerivedEndDateValue(row)
+    if (derivedEndValue === null || row[endKey] === derivedEndValue) {
+      return []
+    }
+
+    return [{
+      rowId,
+      data: {
+        [endKey]: derivedEndValue,
+      },
+    }]
+  })
+}
+
+function buildGanttDependencySuggestionOptions(currentRowId?: string | null) {
+  const dependencyKey = resolveGanttFieldKey('dependencyKey')
+  if (!dependencyKey) {
+    return []
+  }
+
+  const labelKey = resolveGanttFieldKey('labelKey')
+  const startKey = resolveGanttFieldKey('startKey')
+  const endKey = resolveGanttFieldKey('endKey')
+  const options: Array<{ label: string; value: string }> = []
+  const seenValues = new Set<string>()
+
+  for (const row of runtimeRows.value.length ? runtimeRows.value : inputRows.value) {
+    const rowId = String(row.id ?? '').trim()
+    if (!rowId || rowId === currentRowId) {
+      continue
+    }
+
+    const label = labelKey ? asString(row[labelKey]).trim() : ''
+    const timingParts = [
+      startKey ? asString(row[startKey]).trim() : '',
+      endKey ? asString(row[endKey]).trim() : '',
+    ].filter(Boolean)
+    const baseLabel = label || rowId
+    const descriptor = timingParts.length ? `${baseLabel} · ${timingParts.join(' -> ')}` : baseLabel
+
+    const candidateValues = [rowId, `${rowId}:FS`, `${rowId}:SS`, `${rowId}:FF`, `${rowId}:SF`]
+    for (const candidateValue of candidateValues) {
+      if (seenValues.has(candidateValue)) {
+        continue
+      }
+
+      seenValues.add(candidateValue)
+      const dependencyType = candidateValue.includes(':') ? candidateValue.split(':')[1] : null
+      options.push({
+        label: dependencyType ? `${descriptor} · ${dependencyType}` : descriptor,
+        value: candidateValue,
+      })
+    }
+  }
+
+  return options
+}
+
+function nextMilestoneLabel(rows: readonly GridRow[], labelKey: string) {
+  let highestIndex = 0
+
+  for (const row of rows) {
+    const value = asString(row[labelKey]).trim()
+    const match = /^milestone(?:\s+(\d+))?$/i.exec(value)
+    if (!match) {
+      continue
+    }
+
+    const index = Number(match[1] ?? '1')
+    if (Number.isFinite(index)) {
+      highestIndex = Math.max(highestIndex, index)
+    }
+  }
+
+  return highestIndex <= 0 ? 'Milestone' : `Milestone ${highestIndex + 1}`
+}
+
+function resolveMilestoneAnchorDate(activeRow: GridRow | null) {
+  if (!activeRow) {
+    return null
+  }
+
+  const endKey = resolveGanttFieldKey('endKey')
+  const startKey = resolveGanttFieldKey('startKey')
+  return parseGridDateValue((endKey && activeRow[endKey]) || (startKey && activeRow[startKey]) || null)
+}
+
+function insertGanttMilestoneRow() {
+  if (!props.sheet || !isSheetGanttConfigUsable(effectiveSheetGanttConfig.value)) {
+    openGanttSetupDialog()
+    return
+  }
+
+  const currentColumns = readGridColumns()
+  const currentRows = readGridRows()
+  const activeCell = resolveActiveCellState()
+  const insertAtRowIndex = activeCell ? Math.min(currentRows.length, activeCell.rowIndex + 1) : currentRows.length
+  const anchorRow = activeCell ? currentRows[activeCell.rowIndex] ?? null : currentRows[currentRows.length - 1] ?? null
+  const anchorDate = resolveMilestoneAnchorDate(anchorRow)
+  const milestoneRow = createEmptyRow({ includeSystemValues: true })
+  const labelKey = resolveGanttFieldKey('labelKey')
+  const startKey = resolveGanttFieldKey('startKey')
+  const endKey = resolveGanttFieldKey('endKey')
+  const durationKey = resolveGanttFieldKey('durationKey')
+  const progressKey = resolveGanttFieldKey('progressKey')
+
+  if (labelKey) {
+    milestoneRow[labelKey] = nextMilestoneLabel(currentRows, labelKey)
+  }
+
+  if (startKey && anchorDate) {
+    milestoneRow[startKey] = formatGridDateValueForColumn(resolveCurrentGridColumn(startKey), anchorDate)
+  }
+
+  if (endKey && anchorDate) {
+    milestoneRow[endKey] = formatGridDateValueForColumn(resolveCurrentGridColumn(endKey), anchorDate)
+  }
+
+  if (durationKey) {
+    milestoneRow[durationKey] = 1
+  }
+
+  if (progressKey) {
+    milestoneRow[progressKey] = 0
+  }
+
+  const beforeSnapshot = captureGridHistorySnapshot()
+  const insertedRows = [...currentRows]
+  insertedRows.splice(insertAtRowIndex, 0, milestoneRow)
+  const rewrittenStructure = rewriteFormulaReferencesForInsertedRows(
+    currentColumns,
+    insertedRows,
+    insertAtRowIndex,
+    1,
+  )
+  const nextStyles = rebaseSheetStyleRules(
+    readGridStyles(),
+    currentRows,
+    currentColumns,
+    rewrittenStructure.rows,
+    rewrittenStructure.columns,
+  )
+  applyGridStructureChange(rewrittenStructure.columns, rewrittenStructure.rows, nextStyles)
+  recordGridHistoryTransaction('Insert milestone row', beforeSnapshot)
+}
+
+function createRecommendedGanttColumn(
+  fieldKey: SheetGanttConfigFieldKey,
+  existingKeys: Set<string>,
+) {
+  const template = GANTT_PREPARE_COLUMN_TEMPLATES[fieldKey]
+  const key = uniqueColumnKey(template.label, existingKeys)
+  existingKeys.add(key)
+
+  return {
+    key,
+    label: template.label,
+    formula_alias: template.label,
+    data_type: resolveGridColumnDataTypeForColumnType(template.columnType),
+    column_type: template.columnType,
+    width: template.width,
+    editable: true,
+    computed: false,
+    expression: null,
+    options: [],
+    settings: {},
+  } satisfies SheetGridColumn
+}
+
+function prepareSheetColumnsForGantt(seedConfig: SheetGanttConfigPreference | null) {
+  const currentColumns = readGridColumns()
+  const currentRows = readGridRows()
+  const currentStyles = readGridStyles()
+  const nextColumns = [...currentColumns]
+  const existingKeys = new Set(currentColumns.map((column) => column.key))
+  const detectedConfig = autoDetectSheetGanttConfig(currentColumns)
+  const baseConfig = mergeSheetGanttConfigPreference(seedConfig, detectedConfig)
+  const assignedKeys: Partial<Record<SheetGanttConfigFieldKey, string | null>> = {}
+  let didChange = false
+
+  for (const fieldKey of GANTT_PREPARE_ROLE_ORDER) {
+    const configuredKey = baseConfig[fieldKey]
+    if (configuredKey && nextColumns.some((column) => column.key === configuredKey)) {
+      assignedKeys[fieldKey] = configuredKey
+      continue
+    }
+
+    const nextColumn = createRecommendedGanttColumn(fieldKey, existingKeys)
+    nextColumns.push(nextColumn)
+    assignedKeys[fieldKey] = nextColumn.key
+    didChange = true
+  }
+
+  const nextConfig = sanitizeSheetGanttConfigPreference(
+    {
+      ...baseConfig,
+      ...assignedKeys,
+    },
+    nextColumns,
+  )
+
+  if (!didChange) {
+    return {
+      didChange,
+      nextColumns,
+      nextConfig,
+    }
+  }
+
+  const beforeSnapshot = captureGridHistorySnapshot()
+  const nextStyles = rebaseSheetStyleRules(
+    currentStyles,
+    currentRows,
+    currentColumns,
+    currentRows,
+    nextColumns,
+  )
+  applyGridStructureChange(nextColumns, currentRows, nextStyles)
+  recordGridHistoryTransaction('Prepare gantt columns', beforeSnapshot)
+
+  return {
+    didChange,
+    nextColumns,
+    nextConfig,
+  }
+}
+
+function handleGanttSetupSubmit(payload: {
+  config: SheetGanttConfigPreference
+  action: 'save' | 'prepare'
+}) {
+  let nextConfig = sanitizeSheetGanttConfigPreference(payload.config, currentSheetGanttColumns.value)
+  let columnsForValidation = currentSheetGanttColumns.value
+
+  if (payload.action === 'prepare') {
+    const preparedResult = prepareSheetColumnsForGantt(nextConfig)
+    nextConfig = preparedResult.nextConfig
+    columnsForValidation = preparedResult.nextColumns
+  }
+
+  const resolvedConfig = sanitizeSheetGanttConfigPreference(
+    mergeSheetGanttConfigPreference(nextConfig, autoDetectSheetGanttConfig(columnsForValidation)),
+    columnsForValidation,
+  )
+
+  if (!isSheetGanttConfigUsable(resolvedConfig)) {
+    return
+  }
+
+  persistLocalSheetGanttConfig(resolvedConfig)
+  setSheetViewMode('gantt')
+  ganttSetupDialogOpen.value = false
+}
+
+function handleGridViewModeUpdate(viewMode: DataGridAppViewMode) {
+  if (viewMode === 'gantt') {
+    activateGanttView()
+    return
+  }
+
+  activateTableView()
 }
 
 function persistLocalSheetFilterModel(filterModel: DataGridFilterSnapshot | null | undefined) {
@@ -3483,7 +4225,7 @@ const {
   resetGridSessionState: resetSheetGridSessionState,
   teardownGridRuntime: teardownGridRuntimeFromRuntimeSync,
   handleGridReady,
-  handleGridCellChange,
+  handleGridCellChange: handleBaseGridCellChange,
   handleGridSelectionChange,
   syncGridEditorState,
   scheduleGridEditorStateSync,
@@ -3563,8 +4305,10 @@ watch(
     shouldDelayPlaceholderRowsRestore.value = false
     loadLocalSheetColumnWidths(props.sheetId)
     loadLocalSheetRowHeights(props.sheetId)
+    loadLocalSheetViewMode(props.sheetId)
     const hydratedColumns = applyLocalSheetColumnWidths(cloneGridColumns(props.sheet?.columns ?? []))
     loadLocalSheetFilterModel(props.sheetId ?? '', hydratedColumns.map((column) => column.key))
+    loadLocalSheetGanttConfig(props.sheetId, hydratedColumns)
     resetGridSessionState()
     clearGridHistory()
     inputColumns.value = cloneGridColumns(hydratedColumns)
@@ -3594,6 +4338,24 @@ watch(
     }
   },
   { immediate: true },
+)
+
+watch(
+  () => currentSheetGanttColumns.value.map((column) => column.key).join('\u0000'),
+  () => {
+    const sanitizedConfig = sanitizeSheetGanttConfigPreference(
+      localSheetGanttConfig.value,
+      currentSheetGanttColumns.value,
+    )
+
+    if (!areSheetGanttConfigsEqual(localSheetGanttConfig.value, sanitizedConfig)) {
+      persistLocalSheetGanttConfig(sanitizedConfig)
+    }
+
+    if (localSheetViewMode.value === 'gantt' && !isSheetGanttConfigUsable(effectiveSheetGanttConfig.value)) {
+      persistLocalSheetViewMode('table')
+    }
+  },
 )
 
 watch(localSheetRowHeights, () => {
@@ -3750,6 +4512,7 @@ watch(
       ensureIndexPaneCanvasViewportListeners()
       ensureIndexPaneCanvasResizeObserver()
       ensureIndexPaneCanvasObserver()
+      ensureGanttPaneWidthObserver()
     })
 
     if (!inlineFormulaCell.value) {
@@ -3759,6 +4522,15 @@ watch(
     void nextTick(() => {
       applyFormulaReferenceHighlights()
       ensureFormulaHighlightObserver()
+    })
+  },
+)
+
+watch(
+  () => activeGridViewMode.value,
+  () => {
+    void nextTick(() => {
+      ensureGanttPaneWidthObserver()
     })
   },
 )
@@ -3797,6 +4569,7 @@ onBeforeUnmount(() => {
   disconnectIndexPaneCanvasViewportListeners()
   disconnectIndexPaneCanvasResizeObserver()
   disconnectIndexPaneCanvasObserver()
+  disconnectGanttPaneWidthObserver()
   disposeGridCanvasColorProbe()
   disconnectFormulaHighlightViewportListeners()
   disposeFormulaPreviewTooltip()
@@ -3856,11 +4629,25 @@ function toSelectionSummaryNumber(value: unknown) {
   }
 
   if (value instanceof Date) {
-    return value.getTime()
+    return null
   }
 
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function isSelectionSummaryDateLikeColumn(columnKey: string) {
+  const column = currentGridStyleColumns.value.find((entry) => entry.key === columnKey)
+  if (!column) {
+    return false
+  }
+
+  return (
+    column.column_type === 'date' ||
+    column.column_type === 'datetime' ||
+    column.column_type === 'created_at' ||
+    column.column_type === 'updated_at'
+  )
 }
 
 function isSelectionSummaryValueEmpty(value: unknown) {
@@ -3904,6 +4691,15 @@ function buildPlaceholderSelectionRow(rowIndex: number): GridSourceRowNode {
 
 function toGridSelectionRowNode(row: GridSourceRowNode) {
   return row as Parameters<typeof readGridSelectionCell>[0]
+}
+
+function resolveVisualSelectionRowId(rows: readonly GridRow[], rowIndex: number) {
+  const rowId = rows[rowIndex]?.id
+  if (typeof rowId === 'string' || typeof rowId === 'number') {
+    return rowId
+  }
+
+  return buildPlaceholderSelectionRow(rowIndex).rowId
 }
 
 function buildSelectionAggregatesLabelFromTargets() {
@@ -3953,6 +4749,10 @@ function buildSelectionAggregatesLabelFromTargets() {
     const value = readGridSelectionCell(rowNode, columnKey)
     if (!isSelectionSummaryValueEmpty(value)) {
       hasNonEmptyValue = true
+    }
+
+    if (isSelectionSummaryDateLikeColumn(columnKey)) {
+      continue
     }
 
     const numericValue = toSelectionSummaryNumber(value)
@@ -4296,6 +5096,26 @@ function resolveGridHeaderTarget(event: MouseEvent): GridHeaderTarget | null {
   }
 }
 
+function resolveGridCornerTarget(event: MouseEvent): GridCornerTarget | null {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) {
+    return null
+  }
+
+  if (isGridHeaderInteractiveControlTarget(target)) {
+    return null
+  }
+
+  const cornerHeader = target.closest<HTMLElement>(
+    '.grid-cell--header.grid-cell--index.grid-cell--index-header:not([data-column-key])',
+  )
+  if (!cornerHeader) {
+    return null
+  }
+
+  return { kind: 'select-all' }
+}
+
 function buildColumnSelectionSnapshots(target: GridHeaderTarget, event: MouseEvent) {
   const rows = readGridRows()
   const placeholderTailCount = activePlaceholderRowCount.value
@@ -4312,12 +5132,8 @@ function buildColumnSelectionSnapshots(target: GridHeaderTarget, event: MouseEve
     event.shiftKey && currentSelectionRange ? currentSelectionRange.startColumn : target.columnIndex
   const startColumn = Math.min(anchorColumnIndex, target.columnIndex)
   const endColumn = Math.max(anchorColumnIndex, target.columnIndex)
-  const startRowId = rows[0]?.id ?? null
-  const endRowId = rows[lastRowIndex]?.id ?? null
-  const normalizedStartRowId =
-    typeof startRowId === 'string' || typeof startRowId === 'number' ? startRowId : null
-  const normalizedEndRowId =
-    typeof endRowId === 'string' || typeof endRowId === 'number' ? endRowId : null
+  const normalizedStartRowId = resolveVisualSelectionRowId(rows, 0)
+  const normalizedEndRowId = resolveVisualSelectionRowId(rows, lastRowIndex)
   const activeCell = {
     rowIndex: 0,
     colIndex: target.columnIndex,
@@ -4370,8 +5186,100 @@ function buildColumnSelectionSnapshots(target: GridHeaderTarget, event: MouseEve
   }
 }
 
+function buildGridSelectionSnapshots() {
+  const rows = readGridRows()
+  const columnCount = currentGridStyleColumns.value.length
+  const placeholderTailCount = activePlaceholderRowCount.value
+  const visualRowCount = rows.length + placeholderTailCount
+  const lastRowIndex = visualRowCount - 1
+  const lastColumnIndex = columnCount - 1
+  if (lastRowIndex < 0 || lastColumnIndex < 0) {
+    return null
+  }
+
+  const normalizedStartRowId = resolveVisualSelectionRowId(rows, 0)
+  const normalizedEndRowId = resolveVisualSelectionRowId(rows, lastRowIndex)
+  const activeCell = {
+    rowIndex: 0,
+    colIndex: 0,
+    rowId: normalizedStartRowId,
+  }
+
+  return {
+    gridSnapshot: {
+      activeCell,
+      activeRangeIndex: 0,
+      ranges: [
+        {
+          startRow: 0,
+          endRow: lastRowIndex,
+          startCol: 0,
+          endCol: lastColumnIndex,
+        },
+      ],
+      selectionRange: {
+        startRow: 0,
+        endRow: lastRowIndex,
+        startColumn: 0,
+        endColumn: lastColumnIndex,
+      },
+    } satisfies GridSelectionSnapshotLike,
+    runtimeSnapshot: {
+      activeCell,
+      activeRangeIndex: 0,
+      ranges: [
+        {
+          startRow: 0,
+          endRow: lastRowIndex,
+          startCol: 0,
+          endCol: lastColumnIndex,
+          startRowId: normalizedStartRowId,
+          endRowId: normalizedEndRowId,
+          anchor: {
+            rowIndex: 0,
+            colIndex: 0,
+            rowId: normalizedStartRowId,
+          },
+          focus: {
+            rowIndex: lastRowIndex,
+            colIndex: lastColumnIndex,
+            rowId: normalizedEndRowId,
+          },
+        },
+      ],
+    } satisfies GridRuntimeSelectionSnapshotLike,
+  }
+}
+
 function handleGridHeaderClickCapture(event: MouseEvent, target: GridHeaderTarget) {
   const snapshots = buildColumnSelectionSnapshots(target, event)
+  if (!snapshots) {
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+  gridSelectionInteractionSource.value = 'mouse'
+  closeFormulaPreviewTooltip('pointer')
+
+  if (inlineFormulaCell.value) {
+    beginInlineFormulaSelectionReference({ append: event.metaKey || event.ctrlKey })
+    clearInlineFormulaReferenceInsertAnchor()
+    formulaReferencePointerState.value = null
+  }
+
+  getGridRuntime()?.api?.selection?.setSnapshot(snapshots.runtimeSnapshot)
+  handleGridSelectionChange({ snapshot: snapshots.gridSnapshot })
+
+  if (inlineFormulaCell.value) {
+    void nextTick(() => {
+      scheduleInlineFormulaGridRefocus()
+    })
+  }
+}
+
+function handleGridCornerClickCapture(event: MouseEvent) {
+  const snapshots = buildGridSelectionSnapshots()
   if (!snapshots) {
     return
   }
@@ -4410,6 +5318,12 @@ function handleGridClickCapture(event: MouseEvent) {
     return
   }
 
+  const cornerTarget = resolveGridCornerTarget(event)
+  if (cornerTarget) {
+    handleGridCornerClickCapture(event)
+    return
+  }
+
   const headerTarget = resolveGridHeaderTarget(event)
   if (headerTarget) {
     handleGridHeaderClickCapture(event, headerTarget)
@@ -4428,6 +5342,14 @@ function handleGridDoubleClickCapture(event: MouseEvent) {
   }
 
   if (target instanceof HTMLElement && isGridNativeInteractiveControlTarget(target)) {
+    return
+  }
+
+  const headerTarget = resolveGridHeaderTarget(event)
+  if (headerTarget && !inlineFormulaCell.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    openRenameColumnDialog(headerTarget.columnKey, resolveColumnLabel(headerTarget.columnKey))
     return
   }
 
@@ -4452,6 +5374,40 @@ function resolveGridCellElement(targetCell: { rowId: string; columnKey: string }
 
 function getGridRuntime() {
   return dataGridRef.value?.getRuntime() ?? null
+}
+
+function handleGridCellChange() {
+  const previousRows = cloneGridRows(runtimeRows.value.length ? runtimeRows.value : inputRows.value)
+  handleBaseGridCellChange()
+
+  if (isApplyingDerivedGanttEdits.value) {
+    return
+  }
+
+  const derivedEdits = buildDerivedGanttRowEdits(
+    previousRows,
+    runtimeRows.value.length ? runtimeRows.value : inputRows.value,
+  )
+  if (!derivedEdits.length) {
+    return
+  }
+
+  isApplyingDerivedGanttEdits.value = true
+  try {
+    const runtime = getGridRuntime()
+    const didApplyRuntime = runtime?.api?.rows?.applyEdits?.(derivedEdits) ?? false
+    if (!didApplyRuntime) {
+      const currentRows = runtimeRows.value.length ? runtimeRows.value : inputRows.value
+      const patchedRows = applyRowEditsToRows(currentRows, derivedEdits)
+      inputRows.value = cloneGridRows(patchedRows)
+      runtimeRows.value = cloneGridRows(patchedRows)
+      scheduleDraftChange(undefined, patchedRows)
+      scheduleFormulaCellRefresh()
+      scheduleCellHistorySync()
+    }
+  } finally {
+    isApplyingDerivedGanttEdits.value = false
+  }
 }
 
 function runGridStructuralRowAction(
@@ -6430,10 +7386,18 @@ function toDataGridColumn(column: SheetGridColumn): DataGridAppColumnInput<GridR
 
 function resolveColumnPresentation(column: SheetGridColumn): GridColumnPresentationLike<GridRow> | undefined {
   const presentation: GridColumnPresentationLike<GridRow> = {}
+  const durationKey = resolveGanttFieldKey('durationKey')
+  const dependencyKey = resolveGanttFieldKey('dependencyKey')
 
-  if (column.data_type === 'number' || column.column_type === 'percent') {
+  if (column.data_type === 'number' || column.column_type === 'percent' || column.key === durationKey) {
     presentation.align = 'right'
     presentation.headerAlign = 'right'
+  }
+
+  if (column.key === dependencyKey) {
+    presentation.options = (row: GridRow) => Promise.resolve(
+      buildGanttDependencySuggestionOptions(String(row?.id ?? '')),
+    )
   }
 
   if ((column.data_type === 'status' || column.column_type === 'select') && column.options.length) {
@@ -6478,6 +7442,10 @@ function resolveDataGridFormatType(column: SheetGridColumn) {
 }
 
 function resolveDataGridCellType(column: SheetGridColumn) {
+  if (column.key === resolveGanttFieldKey('dependencyKey')) {
+    return 'select' as const
+  }
+
   if (column.column_type === 'checkbox') {
     return 'checkbox' as const
   }
@@ -6522,7 +7490,12 @@ function resolveDataGridCellType(column: SheetGridColumn) {
 }
 
 function resolveColumnLabel(columnKey: string) {
-  return runtimeColumns.value.find((column) => column.key === columnKey)?.label ?? columnKey
+  const runtimeColumn = runtimeColumns.value.find((column) => column.key === columnKey)
+  if (runtimeColumn) {
+    return runtimeColumn.label
+  }
+
+  return inputColumns.value.find((column) => column.key === columnKey)?.label ?? columnKey
 }
 
 function resolveColumnFormulaReferenceLabel(columnKey: string) {
@@ -6805,7 +7778,9 @@ defineExpose<SheetStageHandle>({
       <div class="sheet-stage__identity">
         <div class="sheet-stage__header-copy">
           <div class="sheet-stage__header-topline">
-            <span class="sheet-stage__sheet-kicker">Spreadsheet</span>
+            <span class="sheet-stage__sheet-kicker">
+              {{ activeGridViewMode === 'gantt' ? 'Spreadsheet + Gantt' : 'Spreadsheet' }}
+            </span>
           </div>
           <h2>{{ sheetName }}</h2>
         </div>
@@ -6815,6 +7790,33 @@ defineExpose<SheetStageHandle>({
         <span class="sheet-save-pill" :class="`sheet-save-pill--${saveStatusTone}`">
           {{ saveStatusLabel ?? (savingChanges ? 'Saving...' : hasUnsavedChanges ? 'Unsaved changes' : 'All changes saved') }}
         </span>
+
+        <UiMenu placement="bottom" align="end" :gutter="8">
+          <UiMenuTrigger as-child>
+            <UiButton variant="ghost" size="sm" :disabled="!sheet">
+              View
+            </UiButton>
+          </UiMenuTrigger>
+
+          <UiMenuContent class="sheet-stage__view-menu-content">
+            <UiMenuItem :disabled="!sheet || activeGridViewMode === 'table'" @select="activateTableView">
+              Spreadsheet
+            </UiMenuItem>
+            <UiMenuItem :disabled="!sheet || activeGridViewMode === 'gantt'" @select="activateGanttView">
+              {{ canRenderGanttView ? 'Open gantt timeline' : 'Set up gantt timeline' }}
+            </UiMenuItem>
+            <UiMenuItem :disabled="!sheet" @select="openGanttSetupDialog">
+              Configure gantt
+            </UiMenuItem>
+
+            <template v-if="activeGridViewMode === 'gantt' && canRenderGanttView">
+              <UiMenuSeparator />
+              <UiMenuItem @select="insertGanttMilestoneRow">
+                Insert milestone row
+              </UiMenuItem>
+            </template>
+          </UiMenuContent>
+        </UiMenu>
 
         <UiButton
           variant="secondary"
@@ -6837,6 +7839,48 @@ defineExpose<SheetStageHandle>({
         <!-- <UiButton variant="secondary" size="sm">Share</UiButton> -->
       </div>
     </header>
+
+    <section v-if="sheet && activeGridViewMode === 'gantt'" class="sheet-stage__toolbar sheet-stage__toolbar--gantt">
+      <div class="sheet-stage__toolbar-group">
+        <UiButton
+          variant="secondary"
+          size="sm"
+          @click="activateTableView"
+        >
+          Back to spreadsheet
+        </UiButton>
+        <UiButton
+          v-if="canRenderGanttView"
+          variant="secondary"
+          size="sm"
+          @click="insertGanttMilestoneRow"
+        >
+          Milestone row
+        </UiButton>
+        <UiButton variant="ghost" size="sm" @click="openGanttSetupDialog">
+          Configure gantt
+        </UiButton>
+      </div>
+
+      <div class="sheet-stage__toolbar-group">
+        <template v-if="activeGridViewMode === 'gantt' && effectiveSheetGanttConfig">
+          <UiButton
+            v-for="zoomLevel in SHEET_GANTT_ZOOM_OPTIONS"
+            :key="zoomLevel"
+            variant="secondary"
+            size="sm"
+            :active="effectiveSheetGanttConfig.zoomLevel === zoomLevel"
+            @click="setGanttZoomLevel(zoomLevel)"
+          >
+            {{ zoomLevel.charAt(0).toUpperCase() + zoomLevel.slice(1) }}
+          </UiButton>
+        </template>
+
+        <p class="sheet-stage__toolbar-note">
+          {{ ganttToolbarNote }}
+        </p>
+      </div>
+    </section>
 
     <section
       ref="sheetGridStageRef"
@@ -6890,6 +7934,8 @@ defineExpose<SheetStageHandle>({
             :virtualization="GRID_VIRTUALIZATION"
             :grid-lines="GRID_LINES"
             :toolbar-modules="gridToolbarModules"
+            :view-mode="activeGridViewMode"
+            :gantt="dataGridGanttConfig"
             render-mode="virtualization"
             layout-mode="fill"
             :base-row-height="BASE_GRID_ROW_HEIGHT"
@@ -6907,6 +7953,7 @@ defineExpose<SheetStageHandle>({
             @cell-change="handleGridCellChange"
             @selection-change="handleTypedGridSelectionChange"
             @update:state="handleGridStateUpdate"
+            @update:view-mode="handleGridViewModeUpdate"
           />
 
           <div
@@ -7053,6 +8100,13 @@ defineExpose<SheetStageHandle>({
       :name-validator="renameColumnDialogValidator"
       :column-type-options="GRID_COLUMN_TYPE_OPTIONS"
       @submit="handleColumnRename"
+    />
+
+    <GanttSetupDialog
+      v-model="ganttSetupDialogOpen"
+      :columns="currentSheetGanttColumns"
+      :initial-config="effectiveSheetGanttConfig"
+      @submit="handleGanttSetupSubmit"
     />
 
     <ConfirmDialog

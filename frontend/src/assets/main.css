@@ -529,13 +529,14 @@ button:disabled {
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 0;
   padding: 18px 20px 18px 18px;
   overflow: hidden;
 }
 
 .sheet-stage__header {
+  grid-row: 1;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -588,18 +589,34 @@ button:disabled {
 }
 
 .sheet-stage__toolbar {
+  grid-row: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   flex-wrap: wrap;
+  margin-bottom: 12px;
   padding: 10px 12px;
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-surface-subtle);
 }
 
+.sheet-stage__toolbar--gantt {
+  border: 1px solid color-mix(in srgb, var(--color-border-strong) 44%, transparent);
+  background: color-mix(in srgb, var(--color-surface-subtle) 78%, var(--color-surface) 22%);
+}
+
+.sheet-stage__view-menu-content {
+  min-width: 220px;
+}
+
+.sheet-stage__toolbar .ui-button {
+  white-space: nowrap;
+}
+
 .sheet-grid-stage {
+  grid-row: 3;
   min-height: 0;
   height: 100%;
   display: grid;
@@ -1561,6 +1578,7 @@ button:disabled {
 }
 
 .sheet-grid-stage__empty {
+  grid-row: 2 / -1;
   display: grid;
   place-items: center;
   gap: 10px;

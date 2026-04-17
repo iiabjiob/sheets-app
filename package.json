@@ -1,0 +1,5 @@
+{
+	"dependencies": {
+		"@affino/datagrid-gantt": "^0.1.2"
+	}
+}

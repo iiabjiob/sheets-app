@@ -5,6 +5,8 @@ export interface UiPreferences {
     sheetColumnWidths?: Record<string, Record<string, number>>
     sheetRowHeights?: Record<string, Record<string, number>>
     sheetFilterModels?: Record<string, Record<string, unknown>>
+    sheetViewModes?: Record<string, 'table' | 'gantt'>
+    sheetGanttConfigs?: Record<string, Record<string, unknown>>
   }
 }
 
@@ -151,6 +153,18 @@ function normalizeSheetFilterModelPreference(value: unknown) {
   return clonePersistableUiPreferenceValue(value) as Record<string, unknown>
 }
 
+function normalizeSheetViewModePreference(value: unknown) {
+  return value === 'table' || value === 'gantt' ? value : null
+}
+
+function normalizeSheetGanttConfigPreference(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null
+  }
+
+  return clonePersistableUiPreferenceValue(value) as Record<string, unknown>
+}
+
 export function readSheetColumnWidthPreferences(sheetId: string) {
   if (!sheetId) {
     return {}
@@ -242,6 +256,82 @@ export function writeSheetFilterModelPreference(
       layout: {
         ...currentPreferences.layout,
         sheetFilterModels: nextSheetFilterModels,
+      },
+    }
+  })
+}
+
+export function readSheetViewModePreference(sheetId: string) {
+  if (!sheetId) {
+    return null
+  }
+
+  return normalizeSheetViewModePreference(readUiPreferences().layout?.sheetViewModes?.[sheetId])
+}
+
+export function writeSheetViewModePreference(
+  sheetId: string,
+  viewMode: 'table' | 'gantt' | null,
+) {
+  if (!sheetId) {
+    return
+  }
+
+  const normalizedViewMode = normalizeSheetViewModePreference(viewMode)
+  updateUiPreferences((currentPreferences) => {
+    const nextSheetViewModes = {
+      ...(currentPreferences.layout?.sheetViewModes ?? {}),
+    }
+
+    if (normalizedViewMode) {
+      nextSheetViewModes[sheetId] = normalizedViewMode
+    } else {
+      delete nextSheetViewModes[sheetId]
+    }
+
+    return {
+      ...currentPreferences,
+      layout: {
+        ...currentPreferences.layout,
+        sheetViewModes: nextSheetViewModes,
+      },
+    }
+  })
+}
+
+export function readSheetGanttConfigPreference(sheetId: string) {
+  if (!sheetId) {
+    return null
+  }
+
+  return normalizeSheetGanttConfigPreference(readUiPreferences().layout?.sheetGanttConfigs?.[sheetId])
+}
+
+export function writeSheetGanttConfigPreference(
+  sheetId: string,
+  ganttConfig: Record<string, unknown> | null,
+) {
+  if (!sheetId) {
+    return
+  }
+
+  const normalizedGanttConfig = normalizeSheetGanttConfigPreference(ganttConfig)
+  updateUiPreferences((currentPreferences) => {
+    const nextSheetGanttConfigs = {
+      ...(currentPreferences.layout?.sheetGanttConfigs ?? {}),
+    }
+
+    if (normalizedGanttConfig) {
+      nextSheetGanttConfigs[sheetId] = normalizedGanttConfig
+    } else {
+      delete nextSheetGanttConfigs[sheetId]
+    }
+
+    return {
+      ...currentPreferences,
+      layout: {
+        ...currentPreferences.layout,
+        sheetGanttConfigs: nextSheetGanttConfigs,
       },
     }
   })

@@ -1,0 +1,60 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@affino/datagrid-gantt':
+        specifier: ^0.1.2
+        version: 0.1.2
+
+packages:
+
+  '@affino/datagrid-core@0.3.12':
+    resolution: {integrity: sha512-UyXj8OPxHj1kEdodyvDdn2lJdst+fEHdACodMeFrKbOMbL1vB8hdhi606+hNyOXGClVddoom4LgbMTJvd28xaw==}
+
+  '@affino/datagrid-format@0.1.1':
+    resolution: {integrity: sha512-mAmBJmE1rAYTbZ70gR5aM/tDPs8dj273bUXwPLk8swtnTzqzKGyuUQEgFAk43nFbKG5DdS4sOuaBcj7fXK5K4g==}
+
+  '@affino/datagrid-formula-engine@0.1.1':
+    resolution: {integrity: sha512-UPSD6Mr81nQhJiYN+3o1Y8CMbTOc7Lg81oNeBjHHBU2P72wq1Gq4EuVOWQUnWSxNxpZfxe7KPV1htGkvWOM6nA==}
+
+  '@affino/datagrid-gantt@0.1.2':
+    resolution: {integrity: sha512-ebfG4vu7K3hfwUojDJi2pRD++j1OB6WaNP4jBmIrdQv+1wRtqwtNWlCxfJsXj8ND/wqcA2+aRyLC1KM3X/q9Cg==}
+
+  '@affino/datagrid-pivot@0.1.1':
+    resolution: {integrity: sha512-98ukH9cAb73l0fNvFvyjEQfP2m1RzFaCGN++tCVX3t1e0QrspdJ+TPybc79/PQ3t7ih1Ymyq9GStaOBokmdorg==}
+
+  '@affino/datagrid-plugins@0.2.2':
+    resolution: {integrity: sha512-r7DGmiGnycKet0UQ02eGo3hT4mJAo/Z3UZcLuXXJROuKmjZYYwb17x9JXBa3CDJ9Mg7UOHaKNqQvzT0xlEv3FA==}
+
+  '@affino/projection-engine@0.2.2':
+    resolution: {integrity: sha512-nHw1bl3gkZeq2R6y7T5O4tZ3ur9XCBR9MY8BQy7wIWBEzIs26R54+KYim81AFVNc4zFwl0Iyr2nI6Yg4Lo/QGA==}
+
+snapshots:
+
+  '@affino/datagrid-core@0.3.12':
+    dependencies:
+      '@affino/datagrid-format': 0.1.1
+      '@affino/datagrid-formula-engine': 0.1.1
+      '@affino/datagrid-pivot': 0.1.1
+      '@affino/datagrid-plugins': 0.2.2
+      '@affino/projection-engine': 0.2.2
+
+  '@affino/datagrid-format@0.1.1': {}
+
+  '@affino/datagrid-formula-engine@0.1.1': {}
+
+  '@affino/datagrid-gantt@0.1.2':
+    dependencies:
+      '@affino/datagrid-core': 0.3.12
+
+  '@affino/datagrid-pivot@0.1.1': {}
+
+  '@affino/datagrid-plugins@0.2.2': {}
+
+  '@affino/projection-engine@0.2.2': {}
